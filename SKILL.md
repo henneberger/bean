@@ -106,6 +106,12 @@ finish with `beanw.py sync` and a test `search`.
 changed**. The very first sync downloads the embedding model once (a few minutes; warn them). Add a
 `source` argument to sync just one connector.
 
+**Never run `sync` on your own.** It is the one command you do not run unprompted — it hits the
+user's live services and can take minutes. Run it only when the user explicitly asks. When a
+read command prints `⚠ bean: last synced N days ago …` (or `status` reports `"stale": true`),
+**tell the user their index looks stale and suggest they run `/bean sync`** — then wait for them to
+ask. Still answer their question from the current index; just flag that it may be behind.
+
 ## `status` / `config` / `reembed`
 
 - `beanw.py status [--json]` — connections, tracked sources, index counts, embedding model (warns

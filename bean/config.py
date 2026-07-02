@@ -80,6 +80,11 @@ DEFAULTS: dict = {
         "model": "baidu/Unlimited-OCR",
         "dpi": 200,
     },
+    "sync": {
+        # Warn (never auto-run) when the index hasn't been synced in this many days, so an assistant
+        # can nudge the user to run `bean sync`. 0 = never warn.
+        "stale_days": 7,
+    },
     "slack": {
         "lookback_days": 14,  # recent history re-fetched every sync to catch edits/deletes
     },

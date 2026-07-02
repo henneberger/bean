@@ -18,9 +18,26 @@ Install the plugin (this repo), then:
 ```
 
 `/bean` is not one search. Claude picks from a toolbox — hybrid `search`, `recent`, whole-`thread`
-or `doc` pull, `neighbors` — and composes them. Ask *"I had a convo in the product channel, what's
-the impact on my docs?"* and it grabs the recent Slack conversation, pulls the topics out, then
-searches your Google Docs and Notion for what those topics touch.
+or `doc` pull, graph `related`, `neighbors` — and composes them. Ask *"I had a convo in the product
+channel, what's the impact on my docs?"* and it grabs the recent Slack conversation, pulls the
+topics out, then searches your Google Docs and Notion for what those topics touch.
+
+## Try asking
+
+`/bean` takes plain questions — Claude figures out which tools to run. Some things to try:
+
+- **"what's new this week?"** — recent activity across every source, newest first.
+- **"where did I write about WAL?"** — finds the doc even if you called it a "write-ahead log"
+  elsewhere; exact terms and identifiers land too.
+- **"what did we decide about pricing in #product?"** — pulls the Slack thread and summarizes.
+- **"who last touched the billing runbook, and when?"** — author + recency come back with the hit.
+- **"find ticket ZQ-9001"** — an identifier lands its chunk even with nothing semantically near it.
+- **"what else relates to the launch doc?"** — graph hop to the same project/channel/author.
+- **"summarize the deploy thread and link the doc it references."** — multi-step: thread → search → cite.
+- **"what changed since Monday?"** — date-filtered recency (`--since`).
+
+Under the hood these map to `search` (with `--variant`, `--author`, `--since`, `--before`), `recent`,
+`thread` / `doc`, and `related`; Claude runs them for you and cites every source by title and URL.
 
 ## Connectors
 
@@ -83,26 +100,44 @@ query with `--no-hybrid`, or globally with `config set search.hybrid false`.
 
 ## Configuration
 
-Global settings live in
-`~/.bean/config.json`, and any repo can override them in its own `settings` block.
+Settings resolve in three layers, later wins: built-in defaults ← global `~/.bean/config.json` ←
+a repo's own `settings` block. Nothing is an environment variable; secrets never live here (tokens
+stay in `~/.bean/credentials/`, mode 0600).
 
 ```
-/bean config list                              # resolved settings
+/bean config list                              # the full resolved config
+/bean config get search.recency_decay          # one value
 /bean config set embedding.model BAAI/bge-base-en-v1.5
-/bean config set chunking.lines 60
-/bean config set ocr.backend unlimited-ocr
+/bean config set search.rerank.enabled true
 /bean reembed                                   # apply a model/chunk change to existing docs
 ```
 
-- **Embedding model** — any fastembed model. Change it and `reembed`; `status` warns when the
-  index was built with a different model than the one configured.
-- **Chunking** — window height, overlap, size caps, `title_prefix` (embed the doc title into each
-  chunk), and `large_chunks` (coarse doc-level vectors). Changing these needs a `reembed`.
-- **Search** — hybrid on/off, result count, fusion constant, context expansion, `vector_weight` /
-  `keyword_weight` / `auto_weight`, `recency_decay` / `recency_floor`, `merge_sections`, and a local
-  `rerank` cross-encoder.
-- **Graph** — `graph.enabled` builds the `related` edge index during sync.
-- **OCR** — the PDF backend (below).
+Every leaf below is settable with `config set <path> <value>` (values coerce to the default's type).
+Changing an **index-shape** knob (embedding model, any `chunking.*`, enabling `rerank`) needs a
+`reembed`; `status` warns if the index was built with a different embedding model than configured.
+
+| Path | Default | What it does |
+|------|---------|--------------|
+| `embedding.model` | `BAAI/bge-small-en-v1.5` | any fastembed model (⟳ reembed) |
+| `embedding.batch_size` | `64` | embed batch size |
+| `chunking.lines` / `overlap` | `40` / `8` | window height and shared lines (⟳) |
+| `chunking.max_chars` / `min_chars` | `2000` / `40` | per-chunk cap; drop windows shorter than this (⟳) |
+| `chunking.title_prefix` | `true` | embed the doc title into each chunk for recall (⟳) |
+| `chunking.large_chunks` / `large_chunk_ratio` | `false` / `4` | coarse doc-level vectors for broad questions (⟳) |
+| `search.hybrid` | `true` | fuse vector + keyword (false = vector only) |
+| `search.k` | `8` | results returned |
+| `search.rrf_k` / `keyword_pool` | `60` / `200` | RRF constant; keyword candidate pool |
+| `search.expand` | `1` | neighbouring chunks pulled around each hit |
+| `search.vector_weight` / `keyword_weight` | `1.0` / `1.0` | fusion weights per ranking |
+| `search.auto_weight` | `true` | lean keyword for identifier queries, vector for questions |
+| `search.recency_decay` / `recency_floor` | `0.0` / `0.75` | time-bias toward newer docs (0 = off) |
+| `search.merge_sections` | `true` | coalesce adjacent same-doc chunks into one section |
+| `search.rerank.enabled` / `model` / `pool` | `false` / `Xenova/ms-marco-MiniLM-L-6-v2` / `40` | local cross-encoder rerank, no API (⟳ to warm) |
+| `graph.enabled` | `true` | build the `related` edge index during sync |
+| `sync.stale_days` | `7` | warn (never auto-sync) when the index is older than this; 0 = off |
+| `ocr.backend` / `model` / `dpi` | `auto` / `baidu/Unlimited-OCR` / `200` | PDF text backend (below) |
+| `slack.lookback_days` | `14` | recent Slack history re-fetched each sync to catch edits |
+| `gdocs.lookback_days` | `30` | window for auto-indexing Docs you own (0 = all) |
 
 The embedding model downloads automatically the first time you actually sync or search — not at
 setup — and is cached afterward.

@@ -96,6 +96,8 @@ def run_sync(ws: Workspace, *, only: str | None = None, full: bool = False,
                     store.replace_edges(source, doc_id, implied_edges(doc))
 
         store.set_state("embedding.model", settings["embedding"]["model"])
+        from datetime import datetime, timezone
+        store.set_state("last_sync", datetime.now(timezone.utc).isoformat())
 
     return {"changed": changed, "removed": removed, "errors": errors, "chunks": chunks_indexed}
 

@@ -301,6 +301,8 @@ save_credential("google", {"method": "gcloud"})
 result = run_sync(ews, embed_fn=fake_embed, fetch=gfetch)
 ok(result["errors"] == [] and len(result["changed"]) == 1 and result["chunks"] >= 1,
    f"run_sync ingests and embeds ({result})")
+with Store(ews) as _s:
+    ok(_s.get_state("last_sync") is not None, "run_sync records last_sync for staleness checks")
 hits = lance_search(ews, fake_embed(["billing chargeCard receipt payments"])[0], k=3)
 ok(hits and hits[0]["title"] == "Payments Guide" and hits[0]["url"].startswith("https://docs.google.com/"),
    f"search returns the doc with title + url ({hits[:1]})")
@@ -538,6 +540,24 @@ ok({h["doc_id"] for h in byauthor} == {"ada1"}, "search --author filters to that
 recent_since = recent(fws, since="2025-01-01")
 ok({h["doc_id"] for h in recent_since} == {"ada1"}, "recent --since filters by modified date")
 ok({h["doc_id"] for h in recent(fws, author="Bob")} == {"bob1"}, "recent --author filters by author")
+
+# staleness: bean warns when the index is old, but never syncs on its own
+from bean.cli import _staleness_note  # noqa: E402
+import datetime as _dt  # noqa: E402
+stws = Workspace(repo("stale"))
+ok(_staleness_note(stws) is None, "never-synced index does not nag (setup handles it)")
+with Store(stws) as store:
+    store.set_state("last_sync", "2020-01-01T00:00:00+00:00")
+_note = _staleness_note(stws)
+ok(_note is not None and "stale" in _note and "sync" in _note, "an old last_sync triggers a stale warning")
+with Store(stws) as store:
+    store.set_state("last_sync", _dt.datetime.now(_dt.timezone.utc).isoformat())
+ok(_staleness_note(stws) is None, "a fresh sync clears the warning")
+cfgmod.save_global({"sync": {"stale_days": 0}})
+with Store(stws) as store:
+    store.set_state("last_sync", "2020-01-01T00:00:00+00:00")
+ok(_staleness_note(stws) is None, "stale_days=0 disables the warning")
+cfgmod.save_global({})
 
 # -- notion + github render (offline fakes) -----------------------------------------------------
 def nfetch(url, headers):

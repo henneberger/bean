@@ -48,6 +48,38 @@ def _tracked(config: dict, src) -> int:
     return sum(len(node.get(name) or []) for name in src.lists)
 
 
+def _last_sync_age(ws: Workspace):
+    """(last_sync_iso, age_in_days) or (None, None) if never synced / unreadable."""
+    from datetime import datetime, timezone
+    try:
+        with Store(ws) as store:
+            last = store.get_state("last_sync")
+    except Exception:
+        return None, None
+    if not last:
+        return None, None
+    try:
+        ts = datetime.fromisoformat(last)
+    except ValueError:
+        return last, None
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=timezone.utc)
+    return last, (datetime.now(timezone.utc) - ts).days
+
+
+def _staleness_note(ws: Workspace) -> str | None:
+    """A stderr warning when the index is older than `sync.stale_days` — so an assistant reading the
+    output nudges the user to sync. bean NEVER auto-syncs; this only warns."""
+    days = (cfgmod.resolve(ws).get("sync") or {}).get("stale_days", 7)
+    if not days:
+        return None
+    _, age = _last_sync_age(ws)
+    if age is not None and age >= days:
+        return (f"⚠ bean: last synced {age} days ago (threshold {days}d) — the index may be stale. "
+                f"Suggest the user run `/bean sync`; do not run sync yourself.")
+    return None
+
+
 # -- init / status ------------------------------------------------------------------------------
 def _cred_path(name: str):
     from .workspace import bean_home
@@ -122,6 +154,9 @@ def cmd_status(ws: Workspace, args) -> int:
         counts = store.counts()
         indexed_model = store.get_state("embedding.model")
     settings = cfgmod.resolve(ws)
+    last_sync, age = _last_sync_age(ws)
+    stale_days = (settings.get("sync") or {}).get("stale_days", 7)
+    stale = bool(stale_days and age is not None and age >= stale_days)
     sources = {}
     for s in SOURCES:
         conn = s.connected() if s.connected else {"local": True}
@@ -131,6 +166,7 @@ def cmd_status(ws: Workspace, args) -> int:
                           "lists": {name: node.get(name) or [] for name in s.lists}}
     payload = {"workspace": str(ws.dir), "repo": str(ws.repo),
                "embedding": {"configured": settings["embedding"]["model"], "indexed_with": indexed_model},
+               "last_sync": last_sync, "last_sync_age_days": age, "stale": stale,
                "sources": sources}
     if args.json:
         print(json.dumps(payload, indent=2))
@@ -139,6 +175,8 @@ def cmd_status(ws: Workspace, args) -> int:
     em = settings["embedding"]["model"]
     warn = "" if (not indexed_model or indexed_model == em) else f"  ⚠ index built with {indexed_model} — run `bean reembed`"
     print(f"embedding: {em}{warn}")
+    sync_line = "never synced" if last_sync is None else f"{age}d ago" + ("  ⚠ stale — run `bean sync`" if stale else "")
+    print(f"last sync:  {sync_line}")
     for s in SOURCES:
         info = sources[s.key]
         conn = "local" if not s.auth else ("connected" if info["connected"] else "not connected")
@@ -468,7 +506,13 @@ def main(argv: list[str] | None = None) -> int:
     p.set_defaults(fn=cmd_plugins)
 
     args = parser.parse_args(argv)
-    return args.fn(Workspace(), args)
+    ws = Workspace()
+    # Warn (never auto-sync) when the index is stale, on the commands that read the index.
+    if args.cmd in {"search", "recent", "thread", "doc", "related", "status", "init"}:
+        note = _staleness_note(ws)
+        if note:
+            print(note, file=sys.stderr)
+    return args.fn(ws, args)
 
 
 if __name__ == "__main__":
