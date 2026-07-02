@@ -3,7 +3,7 @@ name: bean
 description: Search the user's connected knowledge base — Slack, Google Docs, Notion, GitHub, and local files (including PDFs) — with local hybrid (semantic + keyword) retrieval. Use when the user asks a question that their work docs/messages would answer, wants to connect or sync a source, or types /bean. Also for "what's in my docs about X", "what did we decide in #channel", or reconstructing context across their tools.
 version: 0.1.0
 user-invocable: true
-argument-hint: init | sync | status | config | add <ref> | <question>
+argument-hint: init | sync | status | plugins | config | add <ref> | <question>
 allowed-tools: Bash
 ---
 
@@ -19,10 +19,11 @@ python3 ${CLAUDE_PLUGIN_ROOT}/scripts/beanw.py <subcommand> …
 
 (the wrapper builds the plugin's virtualenv on first use — slower once, instant after.)
 
-**Never ask the user to run a script, a `python3 …` line, or any command themselves.** For auth,
-ask them only for the token string and then run the auth command yourself. The one unavoidable
-exception is Google's browser sign-in (it must open interactively) — you still launch it; the user
-just completes the browser flow.
+**Setup is assistant-guided; the user never has to run anything.** By default, ask the user only
+for the token string and set the source up yourself. Two exceptions: interactive sign-ins (Google
+via gcloud, Microsoft device-code) open a browser/prompt the user completes; and a **privacy-minded
+user may prefer their token never reach you** — in that case hand them the exact `bean auth …`
+command (or the credential-file path) to run themselves, and continue once they say it's done.
 
 **Route on what the user typed after `/bean`** (or, if the skill auto-triggered on a question,
 treat their message as the question). Empty or a plain question → the retrieval flow below.
@@ -54,29 +55,36 @@ context the question needs, then compose calls. Every command takes `--json`; pr
 
 ## `init`
 
-Setup is a conversation; the CLI never prompts. Run `beanw.py init` — it prints what's connected.
-Then walk the user through what's missing, one source at a time. **You run every command**; the user
-only supplies token strings.
+Setup is a conversation; the CLI never prompts. Run `beanw.py init` for a human summary, or
+`beanw.py init --json` for the **machine-readable setup schema** — one entry per source with its
+`credential_path`, `credential_fields`, `auth_command`, and the `config_key`/`lists` that hold
+tracked refs. bean ships **12 core connectors** — Slack, Google Drive, Notion, GitHub, Confluence,
+Jira, Zendesk, Salesforce, HubSpot, Microsoft 365, Discord, and local files — always on. Read
+`init --json` and act on it; don't memorize the list.
 
-- **Slack** — ask for a **user token** (`xoxp-…`), then run `beanw.py auth slack --token …`. Once
-  connected, bean indexes **all channels the account is a member of** automatically — do NOT ask the
-  user to add channels one by one. (`bean add #name` exists only to *narrow* to specific channels.)
-  How the user gets a token: at https://api.slack.com/apps → **Create New App** → **From scratch** →
-  pick the workspace. Open **OAuth & Permissions**, add **User Token Scopes** `channels:history`,
-  `channels:read`, `users:read`, then click **Install to `<workspace>`** at the top of that page and
-  **Allow**. The **User OAuth Token** (`xoxp-…`) is what they paste to you.
-- **Google** — run `beanw.py auth google` yourself; it opens a browser for the user to sign in
-  through gcloud (no Google Cloud setup). If gcloud is missing, the command says how to install it.
-  Then add specific docs/folders with `beanw.py add <Doc or Drive-folder URL>`.
-- **Notion** — ask for an internal-integration token (`secret_…`), run `beanw.py auth notion
-  --token …`, then add pages with `beanw.py add <page URL>` (the user shares those pages with the
-  integration in Notion).
-- **GitHub** — ask for a PAT (`ghp_…`) with repo read, run `beanw.py auth github --token …`, then
-  add repos with `beanw.py add owner/name`.
-- **Local files** — no auth; add a path with `beanw.py add <file-or-folder>`. A folder is crawled
-  recursively for Markdown/text, office docs (Word `.docx`, OpenDocument `.odt`, RTF), and PDFs.
+**Need a source that isn't core?** ~45 more (Linear, GitLab, Gmail, Asana, Zulip, Airtable, Dropbox,
+web/RSS, SQL, …) ship as **prototypes**: `beanw.py plugins list` shows them; `beanw.py plugins enable
+<name>` turns one on. For a source bean has *no* connector for, author one — invoke the
+**`bean-connector` skill**, which walks you through writing an offline-tested plugin dropped into
+`~/.bean/plugins/`.
 
-Finish with `beanw.py sync` and a test `search`.
+Walk the user through what's missing, one source at a time. For each, get the token (ask where to
+create it — the error message from a failed `auth` names the exact page), then set it up **one of
+three ways**, matching the user's comfort:
+
+1. **You run it** — `beanw.py auth <provider> <fields>` (see `auth_command`). Simplest; the token
+   passes through you.
+2. **The user runs it** (privacy) — hand them the same `beanw.py auth …` line to run themselves so
+   the token never reaches you; continue once they confirm.
+3. **Write files directly** — write the credential JSON to `credential_path` (keys mirror the
+   `credential_fields`, e.g. `{"token": "…"}`, or `{"method":"cloud","url":…,"email":…,"token":…}`
+   for Atlassian Cloud) and append tracked refs into the workspace `config.json` under
+   `config_key` → one of `lists`. `beanw.py add <ref>` does the same for you when a ref is given.
+
+Notes: interactive sources (`interactive_auth: true` — Google, Microsoft) open a browser/device
+prompt instead of taking a token. Whole-collection sources (`always_when_connected: true` — Slack,
+Zendesk, Salesforce…) index everything once connected; tracked lists only *narrow* scope. Then
+finish with `beanw.py sync` and a test `search`.
 
 ## `sync`
 
@@ -97,3 +105,14 @@ changed**. The very first sync downloads the embedding model once (a few minutes
 
 Pass through: `beanw.py add <ref>` then suggest `/bean sync`. Routing detects the source from the
 ref, so you don't specify it.
+
+## `plugins` — connectors beyond the core 12
+
+- `beanw.py plugins list` — the core set, every bundled **prototype** (Linear, GitLab, Gmail, Asana,
+  Zulip, Airtable, Dropbox, cloud storage, web/RSS/SQL, and ~35 more), and any drop-in plugin files.
+- `beanw.py plugins enable <name>` / `disable <name>` — turn a prototype on/off (writes the global
+  config's `plugins.prototypes`). After enabling, set it up like any source (`init --json` now lists
+  it) and `sync`.
+- **A source with no bundled connector?** Author one: invoke the **`bean-connector` skill** for the
+  contract, helpers, an offline test recipe, and a template. It produces a self-contained module you
+  drop into `~/.bean/plugins/` — bean loads anything there exposing a `SOURCE`. No core edits.

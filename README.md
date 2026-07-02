@@ -27,15 +27,43 @@ searches your Google Docs and Notion for what those topics touch.
 
 | Source | Auth | What it indexes |
 |--------|------|-----------------|
+bean ships **12 core connectors**, always on:
+
+| Source | Auth | What it indexes |
+|--------|------|-----------------|
 | **Slack** | user token (`xoxp-…`) | channels, cut into per-week digests with threads as sections |
-| **Google Docs** | gcloud sign-in | single docs or whole Drive folders, exported as Markdown |
+| **Google Drive** | gcloud sign-in | Docs as Markdown; whole Drive folders |
 | **Notion** | integration token | pages and their nested blocks |
 | **GitHub** | personal access token | issues, pull requests (body + comments), and repo Markdown |
+| **Confluence** | Cloud (email + API token) or Server/DC (PAT) | space pages (storage HTML → text) |
+| **Jira** | Cloud (email + API token) or Server/DC (PAT) | project issues + comments |
+| **Zendesk** | subdomain + email + API token | tickets + help-center articles |
+| **Salesforce** | OAuth token + instance URL | Knowledge articles + Cases |
+| **HubSpot** | private-app token | tickets, notes, and knowledge-base articles |
+| **Microsoft 365** | device-code or `az` CLI | OneDrive/SharePoint files, Outlook threads, Teams week-digests |
+| **Discord** | bot token | channels, cut into per-week digests like Slack |
 | **Local files** | none | a folder (crawled recursively) or file — Markdown/text, office docs (**Word**, OpenDocument, RTF), and **PDF** |
 
-More are queued in [docs/connectors.md](docs/connectors.md) — Confluence, Jira, Gmail, SharePoint,
-Linear, and others, ranked by how commonly teams keep knowledge there. Adding one is a `sync()`
-function plus a row in the source registry.
+Where a service offers more than one way in, bean supports both and prefers the path an individual
+can set up without an admin (Atlassian Cloud tokens or Server PATs; Microsoft device-code or `az`).
+
+### More connectors: prototypes + plugins
+
+Another **~45 connectors** — Linear, GitLab, Bitbucket, Gmail (gcloud/IMAP), Google Sheets, Asana,
+Trello, ClickUp, Zulip, Intercom, Freshdesk, ServiceNow, Coda, Notion-style wikis (Guru, GitBook,
+Outline, Slab, BookStack, Document360, MediaWiki, Wikipedia), Gong, Fireflies, Figma, Readwise,
+Airtable, Dropbox, Egnyte, cloud storage (S3/GCS/Azure), web/sitemap, RSS, SQL, Obsidian, and more —
+ship as **prototypes**. They're off by default; turn one on with:
+
+```
+bean plugins list
+bean plugins enable linear
+```
+
+**Need a source bean doesn't have?** Author a connector — a single offline-testable module dropped
+into `~/.bean/plugins/`. The **`bean-connector` skill** walks Claude through the contract, helpers,
+a test recipe, and a template; the ~45 prototypes in [`bean/prototypes/`](bean/prototypes/) are
+worked examples across every API shape. See [docs/connectors.md](docs/connectors.md).
 
 ## Hybrid search
 

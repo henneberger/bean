@@ -22,6 +22,10 @@ REPO_RE = re.compile(r"(?:github\.com[/:])?([\w.-]+)/([\w.-]+?)(?:\.git|/.*)?$")
 def parse_add(item: str):
     if item.startswith("#") or ("://" in item and "github.com" not in item):
         return None
+    # Decline other connectors' scheme-prefixed refs (jira:, ms:, dropbox:, obsidian:, …) so the
+    # bare owner/repo matcher below doesn't swallow the "a/b" tail of e.g. `ms:teams:T/C`.
+    if "github.com" not in item and re.match(r"[a-z][a-z0-9+.-]*:", item):
+        return None
     m = REPO_RE.search(item.strip())
     if m and not item.startswith(("/", "~", "./", "../")):
         return ("repos", f"{m.group(1)}/{m.group(2)}")

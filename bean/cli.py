@@ -49,8 +49,42 @@ def _tracked(config: dict, src) -> int:
 
 
 # -- init / status ------------------------------------------------------------------------------
+def _cred_path(name: str):
+    from .workspace import bean_home
+    return bean_home() / "credentials" / f"{name}.json"
+
+
+def _init_payload(ws: Workspace, config: dict) -> dict:
+    """Machine-readable setup state — one entry per source so the assistant can set a source up by
+    writing files directly: where the credential JSON goes, which fields it takes, and which config
+    lists hold tracked refs. `bean auth …` / `bean add …` remain as the user-run alternative."""
+    sources = []
+    for s in SOURCES:
+        conn = s.connected() if s.connected else None
+        node = config.get(s.config_key) or {}
+        sources.append({
+            "key": s.key, "label": s.label,
+            "auth": s.auth, "interactive_auth": s.interactive_auth,
+            "connected": bool(conn) if s.auth else None,
+            "credential_path": str(_cred_path(s.auth)) if s.auth else None,
+            "credential_fields": s.auth_help or ("token" if s.auth else None),
+            "auth_command": (None if not s.auth else
+                             f"bean auth {s.auth}" + ("" if s.interactive_auth else f" {s.auth_help}".rstrip())),
+            "config_key": s.config_key, "config_path": str(ws.config_path),
+            "lists": list(s.lists), "add_help": s.add_help,
+            "tracked": _tracked(config, s),
+            "always_when_connected": s.always_when_connected,
+        })
+    return {"workspace": str(ws.dir), "repo": str(ws.repo),
+            "config_path": str(ws.config_path),
+            "credentials_dir": str(_cred_path("x").parent), "sources": sources}
+
+
 def cmd_init(ws: Workspace, args) -> int:
     config = _ensure_lists(ws.load_config())
+    if getattr(args, "json", False):
+        print(json.dumps(_init_payload(ws, config), indent=2))
+        return 0
     print(f"bean workspace: {ws.dir}  (repo: {ws.repo})\n")
     any_connected = False
     for s in SOURCES:
@@ -60,15 +94,22 @@ def cmd_init(ws: Workspace, args) -> int:
         if conn:
             any_connected = True
             if s.auth:
-                who = f" ({conn.get('account') or conn.get('login') or conn.get('user') or conn.get('bot')})"
-                head = "connected" + who
+                ident = (conn.get('account') or conn.get('login') or conn.get('user')
+                         or conn.get('bot') or conn.get('name') or conn.get('email')
+                         or conn.get('url'))
+                head = "connected" + (f" ({ident})" if ident else "")
             else:
                 head = "ready (local, no auth)"
-            state = f"{head} — {tracked} tracked" if tracked else f"{head} — add sources: bean add {s.add_help}"
+            state = f"{head} — {tracked} tracked" if tracked else f"{head} — add: bean add {s.add_help}"
         else:
             verb = "bean auth " + s.auth
-            state = f"→ {verb}" + ("" if s.interactive_auth else " --token …")
-        print(f"[{mark}] {s.label:<13} {state}")
+            state = f"→ {verb}" + ("" if s.interactive_auth else f" {s.auth_help}".rstrip())
+        print(f"[{mark}] {s.label:<20} {state}")
+    print("\nSetup is assistant-guided. For each source you want, either:")
+    print("  • paste the token and let the assistant run the command / write the files, or")
+    print("  • run the printed `bean auth …` yourself (token never leaves your machine), or")
+    print(f"  • write the credential JSON to {_cred_path('<provider>')} and refs into config yourself.")
+    print("  (`bean init --json` prints the exact paths + fields for every source.)")
     if any_connected:
         print("\nThen: bean sync   (first sync downloads the embedding model once)")
         print('Ask:  bean search "how do refunds work?"')
@@ -111,14 +152,20 @@ def cmd_auth(ws: Workspace, args) -> int:
     if not src:
         print(f"Unknown provider. Choose from: {', '.join(AUTH)}", file=sys.stderr)
         return 2
+    # Pass along only the credential fields the user actually supplied; each connect() validates
+    # that it got what it needs and stores it (base url/email/etc.) in ~/.bean/credentials.
+    fields = {k: getattr(args, k, None) for k in
+              ("token", "url", "email", "subdomain", "key", "secret", "method")}
+    kwargs = {k: v for k, v in fields.items() if v}
     try:
-        if src.interactive_auth:
-            src.connect()
+        if src.interactive_auth and not kwargs:
+            src.connect()  # browser / device-code flow, no secrets on the command line
         else:
-            if not args.token:
-                print(f"Usage: bean auth {args.provider} --token <token>", file=sys.stderr)
+            if not kwargs and not src.interactive_auth:
+                print(f"Usage: bean auth {args.provider} --token <token> {src.auth_help}".rstrip(),
+                      file=sys.stderr)
                 return 2
-            src.connect(args.token)
+            src.connect(**kwargs)
     except Exception as err:
         print(f"✗ {err}", file=sys.stderr)
         return 1
@@ -145,14 +192,14 @@ def cmd_remove(ws: Workspace, args) -> int:
     config = _ensure_lists(ws.load_config())
     routed = route_add(args.item)
     candidates = {args.item, args.item.lstrip("#")}
-    if routed:
+    if routed and isinstance(routed[2], str):  # some refs (e.g. sqldb queries) are dicts, not ids
         candidates.add(routed[2])
     removed = False
     for s in SOURCES:
         for name in s.lists:
             lst = config[s.config_key][name]
             for value in list(lst):
-                if value in candidates:
+                if isinstance(value, str) and value in candidates:
                     lst.remove(value)
                     removed = True
     if not removed:
@@ -236,6 +283,54 @@ def cmd_neighbors(ws: Workspace, args) -> int:
     return _print_hits(None, hits, args.json, f'No chunk "{args.chunk_id}".')
 
 
+# -- plugins ------------------------------------------------------------------------------------
+def cmd_plugins(ws: Workspace, args) -> int:
+    """List / enable / disable connectors beyond the core set — bundled prototypes and drop-in
+    plugin files. Enabling writes the name into the global config's plugins.prototypes."""
+    from .sources import Source, CORE_SOURCES, reload_sources
+    from .prototypes import registry
+    from .plugins import plugin_dirs, discover_sources
+    available = registry.build(Source)
+    g = cfgmod.load_global()
+    enabled = list((g.get("plugins") or {}).get("prototypes") or [])
+
+    if args.action in (None, "list"):
+        core = {s.key for s in CORE_SOURCES}
+        print("core connectors (always on):")
+        print("  " + ", ".join(sorted(core)))
+        print("\nprototypes (enable with `bean plugins enable <name>`):")
+        for name in sorted(available):
+            mark = "x" if name in enabled else " "
+            print(f"  [{mark}] {name:<14} {available[name].label}")
+        files = [f.name for d in plugin_dirs(g) for f in __import__("pathlib").Path(d).glob("*.py")
+                 if __import__("pathlib").Path(d).is_dir() and f.name != "__init__.py"]
+        drop = discover_sources(Source, global_config=g, prototypes=[])
+        print(f"\ndrop-in plugins ({', '.join(str(d) for d in plugin_dirs(g))}):")
+        print("  " + (", ".join(f"{s.key}" for s in drop) or "(none)"))
+        return 0
+
+    if args.action in ("enable", "disable"):
+        if not args.name:
+            print(f"Usage: bean plugins {args.action} <name>", file=sys.stderr)
+            return 2
+        if args.name not in available:
+            print(f"Unknown prototype {args.name!r}. See `bean plugins list`.", file=sys.stderr)
+            return 2
+        if args.action == "enable" and args.name not in enabled:
+            enabled.append(args.name)
+        elif args.action == "disable" and args.name in enabled:
+            enabled.remove(args.name)
+        g.setdefault("plugins", {})["prototypes"] = enabled
+        cfgmod.save_global(g)
+        reload_sources()
+        print(f"✓ {args.name} {'enabled' if args.action == 'enable' else 'disabled'} — "
+              f"now: {', '.join(enabled) or '(none)'}")
+        return 0
+
+    print("Usage: bean plugins [list | enable <name> | disable <name>]", file=sys.stderr)
+    return 2
+
+
 # -- config -------------------------------------------------------------------------------------
 def cmd_config(ws: Workspace, args) -> int:
     if args.action in (None, "list", "get"):
@@ -266,11 +361,19 @@ def main(argv: list[str] | None = None) -> int:
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = parser.add_subparsers(dest="cmd", required=True)
 
-    sub.add_parser("init", help="connection status + next steps").set_defaults(fn=cmd_init)
+    p = sub.add_parser("init", help="connection status + next steps")
+    p.add_argument("--json", action="store_true", help="machine-readable setup schema (cred paths + fields)")
+    p.set_defaults(fn=cmd_init)
 
     p = sub.add_parser("auth", help="connect a provider")
     p.add_argument("provider", choices=sorted(AUTH))
-    p.add_argument("--token")
+    p.add_argument("--token", help="API token / PAT / access token")
+    p.add_argument("--url", help="site/base URL for self-hosted or multi-tenant providers")
+    p.add_argument("--email", help="account email (Atlassian Cloud, Zendesk, IMAP)")
+    p.add_argument("--subdomain", help="tenant subdomain (Zendesk, ServiceNow)")
+    p.add_argument("--key", help="API key (Trello, Salesforce consumer key)")
+    p.add_argument("--secret", help="API secret / password")
+    p.add_argument("--method", help="auth method when a provider supports several (e.g. device|az)")
     p.set_defaults(fn=cmd_auth)
 
     p = sub.add_parser("add", help="track a doc/channel/page/repo/path")
@@ -334,6 +437,11 @@ def main(argv: list[str] | None = None) -> int:
     p = sub.add_parser("status", help="workspace, auth, and index state")
     p.add_argument("--json", action="store_true")
     p.set_defaults(fn=cmd_status)
+
+    p = sub.add_parser("plugins", help="list / enable / disable prototype + drop-in connectors")
+    p.add_argument("action", nargs="?", choices=["list", "enable", "disable"])
+    p.add_argument("name", nargs="?")
+    p.set_defaults(fn=cmd_plugins)
 
     args = parser.parse_args(argv)
     return args.fn(Workspace(), args)
