@@ -1,0 +1,8 @@
+{
+  "name": "bean",
+  "version": "0.1.0",
+  "description": "Local search over your Google Docs and Slack — /bean <question>, /bean sync, /bean init. No server: your credentials, Lance + DuckDB under ~/.bean.",
+  "author": {
+    "name": "Daniel Henneberger"
+  }
+}
