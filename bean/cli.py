@@ -26,7 +26,7 @@ import json
 import sys
 
 from . import config as cfgmod
-from .search import document, neighbors, recent, search, thread
+from .search import document, neighbors, recent, related, search, thread
 from .sources import SOURCES, route_add
 from .store import Store
 from .workspace import Workspace
@@ -257,15 +257,23 @@ def cmd_search(ws: Workspace, args) -> int:
     if not query:
         print('Usage: bean search "your question"', file=sys.stderr)
         return 2
-    hits = search(ws, query, k=args.k, source=args.source, doc_like=args.doc,
-                  expand=args.expand, hybrid=not args.no_hybrid)
+    hits = search(ws, query, queries=args.variant, k=args.k, source=args.source, doc_like=args.doc,
+                  expand=args.expand, hybrid=not args.no_hybrid, author=args.author,
+                  since=args.since, before=args.before)
     return _print_hits(query, hits, args.json,
                        "No matches. Have you run `bean sync`? (`bean status` shows what's indexed.)")
 
 
 def cmd_recent(ws: Workspace, args) -> int:
-    hits = recent(ws, source=args.source, doc_like=args.doc, limit=args.limit)
+    hits = recent(ws, source=args.source, doc_like=args.doc, author=args.author,
+                  since=args.since, before=args.before, limit=args.limit)
     return _print_hits(None, hits, args.json, "Nothing indexed yet — run `bean sync`.")
+
+
+def cmd_related(ws: Workspace, args) -> int:
+    hits = related(ws, args.ref, source=args.source, limit=args.limit)
+    return _print_hits(None, hits, args.json,
+                       f'No documents related to "{args.ref}" (graph edges build on `bean sync`).')
 
 
 def cmd_thread(ws: Workspace, args) -> int:
@@ -395,9 +403,15 @@ def main(argv: list[str] | None = None) -> int:
 
     p = sub.add_parser("search", help="hybrid semantic + keyword search")
     p.add_argument("query", nargs="+")
+    p.add_argument("--variant", action="append",
+                   help="an extra query variant to fuse (repeatable) — e.g. a paraphrase or the "
+                        "identifiers you spotted; weighted-RRF fuses them with the main query")
     p.add_argument("--k", type=int, default=None)
     p.add_argument("--source", choices=SOURCE_KEYS)
     p.add_argument("--doc", help="restrict to docs whose id/name contains this substring")
+    p.add_argument("--author", help="restrict to docs whose author matches this substring")
+    p.add_argument("--since", help="only docs modified on/after this date (YYYY-MM-DD)")
+    p.add_argument("--before", help="only docs modified before this date (YYYY-MM-DD)")
     p.add_argument("--expand", type=int, default=None, help="neighbouring chunks pulled in per hit")
     p.add_argument("--no-hybrid", action="store_true", help="vector only (skip keyword fusion)")
     p.add_argument("--json", action="store_true")
@@ -406,9 +420,19 @@ def main(argv: list[str] | None = None) -> int:
     p = sub.add_parser("recent", help="most recently changed docs/messages")
     p.add_argument("--source", choices=SOURCE_KEYS)
     p.add_argument("--doc", help="filter by doc id/name substring (e.g. a #channel)")
+    p.add_argument("--author", help="filter by author substring")
+    p.add_argument("--since", help="only docs modified on/after this date (YYYY-MM-DD)")
+    p.add_argument("--before", help="only docs modified before this date (YYYY-MM-DD)")
     p.add_argument("--limit", type=int, default=20)
     p.add_argument("--json", action="store_true")
     p.set_defaults(fn=cmd_recent)
+
+    p = sub.add_parser("related", help="documents one hop away in the graph (same repo/project/channel/author)")
+    p.add_argument("ref", help="a doc id/title substring to expand from")
+    p.add_argument("--source", choices=SOURCE_KEYS)
+    p.add_argument("--limit", type=int, default=20)
+    p.add_argument("--json", action="store_true")
+    p.set_defaults(fn=cmd_related)
 
     p = sub.add_parser("thread", help="a whole thread/document as one block")
     p.add_argument("ref")

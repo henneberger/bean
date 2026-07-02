@@ -4,8 +4,7 @@ Bean is a local hybrid search over your work knowledge, packaged as a Claude
 Code plugin.
 
 You already pay for a Claude plan, why pay again for API calls? Or hand your docs to yet another
-LLM-wrapper SaaS?  No server: bean pulls with your own credentials, embeds on your machine, and stores
-everything in Lance + DuckDB under `~/.bean/` (one workspace folder per repo).
+LLM-wrapper SaaS? Not ready to drop $100k on search? Use Bean, it has no server: bean pulls with your own credentials, embeds on your machine, and stores everything locally.
 
 ## Use it from Claude Code
 
@@ -67,14 +66,20 @@ worked examples across every API shape. See [docs/connectors.md](docs/connectors
 
 ## Hybrid search
 
-Every query runs two rankings and fuses them with reciprocal rank fusion:
+Every query runs two rankings and fuses them with **weighted** reciprocal rank fusion:
 
 - **Vectors** (Lance) for meaning — *"how are customers billed"* finds the billing doc that never
   says "billed".
 - **Keywords** (DuckDB) for exactness — an identifier like `ZQ-9001`, an error string, or a
   `#channel` lands its chunk even when nothing is semantically near it.
 
-Turn fusion off per query with `--no-hybrid`, or globally with `config set search.hybrid false`.
+Fusion is tunable: pass extra `--variant` queries (a paraphrase plus the identifiers you spotted)
+and they all fuse; `auto_weight` leans keyword for identifier queries and vector for questions;
+`recency_decay` biases toward recently-changed docs; adjacent chunks **merge into sections**; and an
+optional local cross-encoder **reranker** (`search.rerank.enabled`, fastembed — no API) polishes the
+top results. Filter by `--author` / `--since` / `--before`, or widen from a doc to its graph
+neighbourhood with `bean related <ref>` (same repo/project/channel/author). Turn fusion off per
+query with `--no-hybrid`, or globally with `config set search.hybrid false`.
 
 ## Configuration
 
@@ -91,8 +96,12 @@ Global settings live in
 
 - **Embedding model** — any fastembed model. Change it and `reembed`; `status` warns when the
   index was built with a different model than the one configured.
-- **Chunking** — window height, overlap, and size caps.
-- **Search** — hybrid on/off, result count, fusion constant, context expansion.
+- **Chunking** — window height, overlap, size caps, `title_prefix` (embed the doc title into each
+  chunk), and `large_chunks` (coarse doc-level vectors). Changing these needs a `reembed`.
+- **Search** — hybrid on/off, result count, fusion constant, context expansion, `vector_weight` /
+  `keyword_weight` / `auto_weight`, `recency_decay` / `recency_floor`, `merge_sections`, and a local
+  `rerank` cross-encoder.
+- **Graph** — `graph.enabled` builds the `related` edge index during sync.
 - **OCR** — the PDF backend (below).
 
 The embedding model downloads automatically the first time you actually sync or search — not at

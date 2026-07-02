@@ -115,9 +115,12 @@ def _ingest_issue(store, repo, it, headers, fetch, log) -> list[str]:
                           headers, fetch=fetch):
             lines += [f"**@{(c.get('user') or {}).get('login', '?')}**: {(c.get('body') or '').strip()}", ""]
     body = "\n".join(lines)
+    login = (it.get("user") or {}).get("login")
     if store.upsert("github", doc_id, title=f"{repo}#{number} {it.get('title', '')}",
                     url=it.get("html_link") or it.get("html_url"),
-                    revision_id=it.get("updated_at"), body=body):
+                    revision_id=it.get("updated_at"), body=body,
+                    meta={"author": login, "created_at": it.get("created_at"),
+                          "modified_at": it.get("updated_at")}):
         log(f"github: updated {doc_id}")
         return [doc_id]
     return []

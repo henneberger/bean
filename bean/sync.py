@@ -6,26 +6,50 @@ documents are re-embedded; deletions revoke their vectors and chunk rows."""
 from __future__ import annotations
 
 from . import config as cfgmod
-from .chunks import chunk_text
+from .chunks import Chunk, chunk_text
 from .index import delete_doc, reindex_doc
 from .sources import SOURCES
 from .store import Store
 from .workspace import Workspace
 
 
+def _large_chunks(base: list, key: str, cfg: dict) -> list:
+    """Coarse doc-level chunks: every `large_chunk_ratio` base chunks joined into one, so broad
+    'which doc is about X' questions match at a section granularity. Vector-only (Lance)."""
+    ratio = max(2, int(cfg.get("large_chunk_ratio", 4)))
+    cap = int(cfg.get("max_chars", 2000)) * ratio
+    out = []
+    for i in range(0, len(base), ratio):
+        grp = base[i:i + ratio]
+        if len(grp) < 2:  # a lone chunk adds nothing over its base chunk
+            continue
+        text = "\n".join(c.text for c in grp)[:cap]
+        out.append(Chunk(id=f"{key}#L{grp[0].start}-large", start=grp[0].start,
+                         end=grp[-1].end, text=text))
+    return out
+
+
 def _embed_rows(ws, store, source, doc_id, embed_fn, chunk_cfg) -> int:
     doc = store.get(source, doc_id)
-    chunks = chunk_text(doc.body, f"{source}/{doc_id}", chunk_cfg)
-    vectors = embed_fn([c.text for c in chunks]) if chunks else []
+    key = f"{source}/{doc_id}"
+    base = chunk_text(doc.body, key, chunk_cfg)
+    large = _large_chunks(base, key, chunk_cfg) if chunk_cfg.get("large_chunks") else []
+    all_chunks = base + large
+    # Enrich the *embedded* text with the doc title so short/mid-doc chunks carry what the doc is
+    # about; the stored/displayed text stays raw. Toggling title_prefix/large_chunks needs reembed.
+    prefix = f"{doc.title}\n" if chunk_cfg.get("title_prefix") and doc.title else ""
+    vectors = embed_fn([prefix + c.text for c in all_chunks]) if all_chunks else []
+    # Lance holds base + large chunks (vectors from enriched text, stored text raw).
+    reindex_doc(ws, source=source, doc_id=doc_id, title=doc.title, url=doc.url,
+                chunks=all_chunks, vectors=vectors)
+    # The DuckDB chunk mirror (keyword search + neighbours + section merge) holds base chunks only.
     rows = [
         {"id": c.id, "title": doc.title, "url": doc.url or "",
          "start": c.start, "end": c.end, "text": c.text}
-        for c, v in zip(chunks, vectors) if v
+        for c, v in zip(base, vectors[:len(base)]) if v
     ]
-    reindex_doc(ws, source=source, doc_id=doc_id, title=doc.title, url=doc.url,
-                chunks=chunks, vectors=vectors)
     store.replace_chunks(source, doc_id, rows)
-    return len(rows)
+    return sum(1 for v in vectors if v)
 
 
 def run_sync(ws: Workspace, *, only: str | None = None, full: bool = False,
@@ -63,6 +87,14 @@ def run_sync(ws: Workspace, *, only: str | None = None, full: bool = False,
         for source, doc_id in removed:
             delete_doc(ws, source, doc_id)
 
+        # Lightweight relationship graph: derive edges (authored_by / in-container) for changed docs.
+        if settings.get("graph", {}).get("enabled", True):
+            from .graph import implied_edges
+            for source, doc_id in changed:
+                doc = store.get(source, doc_id)
+                if doc:
+                    store.replace_edges(source, doc_id, implied_edges(doc))
+
         store.set_state("embedding.model", settings["embedding"]["model"])
 
     return {"changed": changed, "removed": removed, "errors": errors, "chunks": chunks_indexed}
@@ -77,10 +109,18 @@ def reembed(ws: Workspace, *, embed_fn=None, log=lambda m: None) -> dict:
         from .embed import embedder
         embed_fn = embedder(settings["embedding"]["model"], settings["embedding"]["batch_size"])
     total = 0
+    graph_on = settings.get("graph", {}).get("enabled", True)
+    implied_edges = None
+    if graph_on:
+        from .graph import implied_edges
     with Store(ws) as store:
-        docs = [(s, d) for s in [row.key for row in SOURCES] for d in store.doc_ids(s)]
+        docs = [(s, d) for s in store.counts() for d in store.doc_ids(s)]
         for source, doc_id in docs:
             total += _embed_rows(ws, store, source, doc_id, embed_fn, chunk_cfg)
+            if graph_on:
+                doc = store.get(source, doc_id)
+                if doc:
+                    store.replace_edges(source, doc_id, implied_edges(doc))
             log(f"re-embedded {source}/{doc_id}")
         store.set_state("embedding.model", settings["embedding"]["model"])
     return {"docs": len(docs), "chunks": total, "model": settings["embedding"]["model"]}

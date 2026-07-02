@@ -35,6 +35,14 @@ CREATE TABLE IF NOT EXISTS chunks (
   title TEXT, url TEXT, ord INTEGER, start INTEGER, "end" INTEGER, text TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS state (key TEXT PRIMARY KEY, value TEXT);
+-- Lightweight relationship index: edges derived at sync time from source-native metadata
+-- (authored_by → a person, in-container → a repo/project/channel, links-to → another doc). No LLM;
+-- powers `bean related` and graph-expansion. dst_kind ∈ {doc, container, person, link}.
+CREATE TABLE IF NOT EXISTS edges (
+  source TEXT NOT NULL, src_doc TEXT NOT NULL, rel TEXT NOT NULL,
+  dst_kind TEXT NOT NULL, dst TEXT NOT NULL,
+  PRIMARY KEY (source, src_doc, rel, dst_kind, dst)
+);
 """
 
 
@@ -120,6 +128,25 @@ class Store:
     def delete(self, source: str, doc_id: str) -> None:
         self.con.execute("DELETE FROM documents WHERE source=? AND doc_id=?", [source, doc_id])
         self.con.execute("DELETE FROM chunks WHERE source=? AND doc_id=?", [source, doc_id])
+        self.con.execute("DELETE FROM edges WHERE source=? AND src_doc=?", [source, doc_id])
+
+    def modified_map(self, pairs) -> dict:
+        """{(source, doc_id): modified_at} for a set of hits — the recency signal, one query."""
+        rows = list(dict.fromkeys((s, d) for s, d in pairs))
+        if not rows:
+            return {}
+        out: dict = {}
+        # DuckDB has no easy tuple-IN; group by source and filter doc_ids per source.
+        by_src: dict = {}
+        for s, d in rows:
+            by_src.setdefault(s, []).append(d)
+        for s, ids in by_src.items():
+            ph = ",".join("?" * len(ids))
+            for did, mod in self.con.execute(
+                    f"SELECT doc_id, modified_at FROM documents WHERE source=? AND doc_id IN ({ph})",
+                    [s, *ids]).fetchall():
+                out[(s, did)] = mod
+        return out
 
     def doc_ids(self, source: str) -> list[str]:
         return [r[0] for r in self.con.execute(
@@ -181,15 +208,25 @@ class Store:
             "FROM chunks WHERE source=? AND doc_id=? AND ord BETWEEN ? AND ? ORDER BY ord",
             [source, doc_id, ord - radius, ord + radius])
 
+    def _meta_filters(self, where: list, params: list, author, since, before) -> None:
+        if author:
+            where.append("author ILIKE ?"); params.append(f"%{author}%")
+        if since:
+            where.append("COALESCE(modified_at, fetched_at) >= ?"); params.append(since)
+        if before:
+            where.append("COALESCE(modified_at, fetched_at) < ?"); params.append(before)
+
     def recent(self, *, source: str | None = None, doc_like: str | None = None,
-               limit: int = 20) -> list[dict]:
+               author: str | None = None, since=None, before=None, limit: int = 20) -> list[dict]:
         """Most-recently-*modified* documents (by the doc's own timestamp, falling back to when
-        bean fetched it when a source has none), newest first — 'what changed lately'."""
+        bean fetched it when a source has none), newest first — 'what changed lately'. Optional
+        author / since / before narrow to who and when."""
         where, params = ["1=1"], []
         if source:
             where.append("source = ?"); params.append(source)
         if doc_like:
             where.append("doc_id ILIKE ?"); params.append(f"%{doc_like}%")
+        self._meta_filters(where, params, author, since, before)
         return self._rows(
             "SELECT source, doc_id, title, url, body, created_at, modified_at, author, mime, "
             "fetched_at FROM documents "
@@ -198,23 +235,89 @@ class Store:
             params + [limit])
 
     def find_docs(self, *, source: str | None = None, doc_like: str | None = None,
-                  limit: int = 20) -> list[dict]:
+                  author: str | None = None, since=None, before=None, limit: int = 20) -> list[dict]:
         where, params = ["1=1"], []
         if source:
             where.append("source = ?"); params.append(source)
         if doc_like:
             where.append("(doc_id ILIKE ? OR title ILIKE ?)"); params += [f"%{doc_like}%", f"%{doc_like}%"]
+        self._meta_filters(where, params, author, since, before)
         return self._rows(
             "SELECT source, doc_id, title, url, body, created_at, modified_at, author, mime, "
             "fetched_at FROM documents "
             f"WHERE {' AND '.join(where)} ORDER BY COALESCE(modified_at, fetched_at) DESC LIMIT ?",
             params + [limit])
 
+    def doc_meta_map(self, pairs) -> dict:
+        """{(source, doc_id): {"author", "modified_at"}} for filtering fused search hits."""
+        by_src: dict = {}
+        for s, d in dict.fromkeys(pairs):
+            by_src.setdefault(s, []).append(d)
+        out: dict = {}
+        for s, ids in by_src.items():
+            ph = ",".join("?" * len(ids))
+            for did, author, mod in self.con.execute(
+                    f"SELECT doc_id, author, modified_at FROM documents "
+                    f"WHERE source=? AND doc_id IN ({ph})", [s, *ids]).fetchall():
+                out[(s, did)] = {"author": author, "modified_at": mod}
+        return out
+
     def revisions(self, source: str, doc_id: str) -> list[tuple]:
         return self.con.execute(
             "SELECT revision_id, hash, fetched_at FROM revisions WHERE source=? AND doc_id=? ORDER BY fetched_at",
             [source, doc_id],
         ).fetchall()
+
+    # -- edges (lightweight relationship graph) --------------------------------------------------
+    def replace_edges(self, source: str, src_doc: str, rows: list[dict]) -> None:
+        self.con.execute("DELETE FROM edges WHERE source=? AND src_doc=?", [source, src_doc])
+        for r in rows:
+            self.con.execute(
+                "INSERT INTO edges (source, src_doc, rel, dst_kind, dst) VALUES (?, ?, ?, ?, ?) "
+                "ON CONFLICT DO NOTHING",
+                [source, src_doc, r["rel"], r["dst_kind"], str(r["dst"])])
+
+    def edges_of(self, source: str, doc_id: str) -> list[dict]:
+        return self._rows("SELECT rel, dst_kind, dst FROM edges WHERE source=? AND src_doc=?",
+                          [source, doc_id])
+
+    def related(self, source: str, doc_id: str, *, limit: int = 20) -> list[dict]:
+        """Documents one hop away in the edge graph, each with the connecting `reason`:
+        docs sharing a container/person target with this doc, docs it links to, docs linking to it."""
+        mine = self.edges_of(source, doc_id)
+        cand: dict = {}  # (source, doc_id) -> reason string
+
+        def add(s, d, reason):
+            if (s, d) != (source, doc_id):
+                cand.setdefault((s, d), reason)
+
+        for e in mine:
+            kind, dst, rel = e["dst_kind"], e["dst"], e["rel"]
+            if kind == "link":
+                add(source, dst, f"linked from this ({rel})")
+            else:  # container / person: other docs pointing at the same target
+                for r in self._rows(
+                        "SELECT source, src_doc FROM edges WHERE dst_kind=? AND dst=? AND rel=?",
+                        [kind, dst, rel]):
+                    add(r["source"], r["src_doc"], f"same {kind}: {dst}")
+        # docs that link TO this one
+        for r in self._rows(
+                "SELECT source, src_doc, rel FROM edges WHERE dst_kind='link' AND dst=? AND source=?",
+                [doc_id, source]):
+            add(r["source"], r["src_doc"], f"links to this ({r['rel']})")
+
+        if not cand:
+            return []
+        out: list[dict] = []
+        for (s, d), reason in cand.items():
+            doc = self.get(s, d)
+            if doc is None:
+                continue
+            out.append({"source": s, "doc_id": d, "title": doc.title, "url": doc.url,
+                        "body": doc.body, "modified_at": doc.modified_at, "author": doc.author,
+                        "reason": reason})
+        out.sort(key=lambda r: (r.get("modified_at") is None, r.get("modified_at")), reverse=True)
+        return out[:limit]
 
     # -- state (sync cursors etc.; values are JSON) ----------------------------------------------
     def get_state(self, key: str, default=None):

@@ -29,6 +29,15 @@ DEFAULTS: dict = {
         "overlap": 8,       # lines shared between adjacent windows
         "max_chars": 2000,  # hard cap on a chunk's characters
         "min_chars": 40,    # windows shorter than this are dropped
+        # Prepend the document title to each chunk's *embedded* text (stripped from the stored/
+        # displayed text) so short or mid-document chunks still carry what the doc is about — a
+        # cheap recall win. Toggling needs a `bean reembed`.
+        "title_prefix": True,
+        # Also embed a coarse doc-level "large chunk" per `large_chunk_ratio` base chunks, so broad
+        # "which doc is about X" questions match at a section granularity. Vector-only (kept out of
+        # the keyword/neighbour mirror). Needs a `bean reembed`.
+        "large_chunks": False,
+        "large_chunk_ratio": 4,
     },
     "search": {
         "hybrid": True,      # fuse vector + keyword; False = vector only
@@ -36,6 +45,33 @@ DEFAULTS: dict = {
         "rrf_k": 60,         # reciprocal-rank-fusion constant
         "keyword_pool": 200, # keyword candidates fused with the vector candidates
         "expand": 1,         # neighbouring chunks pulled in around each hit (0 = off)
+        # Fusion weights. Each ranking list contributes weight/(rrf_k+rank). Multiple query
+        # variants (the assistant can pass paraphrases + extracted identifiers) fuse the same way.
+        "vector_weight": 1.0,
+        "keyword_weight": 1.0,
+        # Query-type routing: nudge the weights per query — identifier/quoted/error-string queries
+        # lean keyword, natural-language questions lean vector. False = use the fixed weights above.
+        "auto_weight": True,
+        # Recency: multiply a hit's fused score by max(1/(1 + recency_decay*age_years),
+        # recency_floor), from the document's own modified_at. 0.0 = off (no recency bias).
+        "recency_decay": 0.0,
+        "recency_floor": 0.75,
+        # Coalesce adjacent hits from the same document into one section (union of line ranges,
+        # deduped) instead of returning three overlapping chunks as three hits.
+        "merge_sections": True,
+        # Optional local cross-encoder reranker over the fused top-`pool` before taking top-k. Off
+        # by default (downloads a model on first use); no external API — a fastembed cross-encoder.
+        "rerank": {
+            "enabled": False,
+            "model": "Xenova/ms-marco-MiniLM-L-6-v2",
+            "pool": 40,
+        },
+    },
+    "graph": {
+        # Build a lightweight edge index during sync (authored_by, in-container, links-to) from the
+        # metadata connectors already carry — powers `bean related <doc>` and metadata filters.
+        # No LLM extraction; purely derived from source-native fields. False = don't build it.
+        "enabled": True,
     },
     "ocr": {
         # Backend for PDF text. "auto" tries native text first, OCR only for image-only pages.

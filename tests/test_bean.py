@@ -412,6 +412,133 @@ ok(bool(first_chunk), "find_docs returns documents")
 re_res = reembed(hws, embed_fn=fake_embed)
 ok(re_res["docs"] == 2 and re_res["chunks"] >= 2, "reembed rebuilds every stored doc")
 
+# == retrieval upgrades: weighted RRF, routing, recency, merge, enrichment, large chunks, rerank ==
+from bean.search import related as _related, _merge_sections, _query_weights  # noqa: E402
+from bean import graph as _graph  # noqa: E402
+
+_WCFG = {"vector_weight": 1.0, "keyword_weight": 1.0, "auto_weight": True}
+vw, kw = _query_weights("ZQ-9001", _WCFG)
+ok(kw > vw, "auto_weight leans keyword for an identifier query")
+vw, kw = _query_weights("how are customers billed today", _WCFG)
+ok(vw > kw, "auto_weight leans vector for a natural-language question")
+vw2, kw2 = _query_weights("ZQ-9001", {**_WCFG, "auto_weight": False})
+ok(vw2 == 1.0 and kw2 == 1.0, "auto_weight off keeps the fixed weights")
+
+# query variants: a variant carrying the identifier rescues a doc the main query misses
+qvws = Workspace(repo("q-variants"))
+with Store(qvws) as store:
+    store.upsert("gdocs", "dm", title="Meeting", url=None, revision_id=None,
+                 body="the quarterly planning notes for the team roadmap discussion this week")
+    store.upsert("gdocs", "di", title="Ticket", url=None, revision_id=None,
+                 body="incident ZX-42 root cause analysis and the remediation steps that were taken")
+reembed(qvws, embed_fn=fake_embed)
+main_only = hybrid_search(qvws, "quarterly roadmap planning", embed_query_fn=lambda q: fake_embed([q])[0], k=5)
+with_variant = hybrid_search(qvws, "quarterly roadmap planning", queries=["ZX-42"],
+                             embed_query_fn=lambda q: fake_embed([q])[0], k=5)
+ok(main_only[0]["doc_id"] == "dm", "main query ranks the topical doc first")
+ok(with_variant[0]["doc_id"] == "di", "the ZX-42 variant floats the identifier doc to the top via fusion")
+
+# recency: with decay on, the newer doc outranks an equally-relevant old one
+rws = Workspace(repo("recency"))
+with Store(rws) as store:
+    store.upsert("gdocs", "old", title="Old widget", url=None, revision_id=None,
+                 body="widget alpha beta gamma delta epsilon components overview and details",
+                 meta={"modified_at": "2019-01-01T00:00:00Z"})
+    store.upsert("gdocs", "new", title="New widget", url=None, revision_id=None,
+                 body="widget alpha beta gamma delta epsilon components overview and details",
+                 meta={"modified_at": "2026-06-01T00:00:00Z"})
+reembed(rws, embed_fn=fake_embed)
+cfgmod.save_global({"search": {"merge_sections": False}})
+base = hybrid_search(rws, "widget alpha", embed_query_fn=lambda q: fake_embed([q])[0], k=2)
+cfgmod.save_global({"search": {"merge_sections": False, "recency_decay": 8.0, "recency_floor": 0.05}})
+decayed = hybrid_search(rws, "widget alpha", embed_query_fn=lambda q: fake_embed([q])[0], k=2, now=NOW)
+ok(decayed and decayed[0]["doc_id"] == "new", f"recency decay floats the newer doc to the top ({[h['doc_id'] for h in decayed]})")
+ok({h["doc_id"] for h in base} == {"old", "new"}, "both docs retrieved regardless of recency")
+cfgmod.save_global({})
+
+# section merge: two adjacent chunks of one doc collapse into a single section spanning both
+mws = Workspace(repo("merge"))
+body = "\n".join(f"line {i} content here about topic" for i in range(120))
+with Store(mws) as store:
+    store.upsert("gdocs", "big", title="Big", url=None, revision_id=None, body=body)
+reembed(mws, embed_fn=fake_embed)
+with Store(mws) as store:
+    ch = store._rows("SELECT chunk_id AS id, source, doc_id, title, url, ord, start, \"end\", text "
+                     "FROM chunks WHERE doc_id='big' ORDER BY ord", [])
+    two = [{**ch[0], "score": 0.9}, {**ch[1], "score": 0.8}]
+    merged = _merge_sections(store, two)
+    ok(len(merged) == 1, "adjacent same-doc chunks merge into one section")
+    ok(merged[0]["start"] == ch[0]["start"] and merged[0]["end"] == ch[1]["end"],
+       "merged section spans the union line range")
+
+# chunk enrichment: title_prefix lets a title-only term retrieve a doc whose body lacks it
+ews = Workspace(repo("enrich"))
+with Store(ews) as store:
+    store.upsert("gdocs", "z", title="Zephyr", url=None, revision_id=None,
+                 body="the quick brown fox jumps over the lazy dog again and again today")
+reembed(ews, embed_fn=fake_embed)  # title_prefix defaults True
+hit = hybrid_search(ews, "Zephyr", embed_query_fn=lambda q: fake_embed([q])[0], k=3)
+ok(any(h["doc_id"] == "z" for h in hit), "title_prefix embeds the title so a title term retrieves the doc")
+with Store(ews) as _st:
+    ok("Zephyr" not in _st.get("gdocs", "z").body, "…even though the body never says it (title stored separately)")
+
+# large chunks: enabling them adds coarse vectors on top of the base chunks
+lgws = Workspace(repo("largechunks"))
+longbody = "\n".join(f"line {i} about payments and billing" for i in range(200))
+with Store(lgws) as store:
+    store.upsert("gdocs", "L", title="Long", url=None, revision_id=None, body=longbody)
+cfgmod.save_global({})
+n_base = reembed(lgws, embed_fn=fake_embed)["chunks"]
+cfgmod.save_global({"chunking": {"large_chunks": True}})
+n_large = reembed(lgws, embed_fn=fake_embed)["chunks"]
+ok(n_large > n_base, f"large_chunks adds coarse vectors ({n_base} -> {n_large})")
+cfgmod.save_global({})
+
+# rerank: an injected cross-encoder reorders the fused candidates
+rkws = Workspace(repo("rerank"))
+with Store(rkws) as store:
+    store.upsert("gdocs", "a", title="A", url=None, revision_id=None,
+                 body="payments billing invoice records for the finance team monthly review")
+    store.upsert("gdocs", "b", title="B", url=None, revision_id=None,
+                 body="payments billing MARKER invoice records for the finance team monthly review")
+reembed(rkws, embed_fn=fake_embed)
+cfgmod.save_global({"search": {"rerank": {"enabled": True}, "merge_sections": False}})
+rr = hybrid_search(rkws, "payments billing", embed_query_fn=lambda q: fake_embed([q])[0], k=2,
+                   rerank_fn=lambda q, texts: [1.0 if "MARKER" in t else 0.0 for t in texts])
+ok(rr and rr[0]["doc_id"] == "b", "injected reranker floats the MARKER doc to the top")
+cfgmod.save_global({})
+
+# graph: implied edges (authored_by / in-container) + `related` one-hop expansion
+ok([e["dst"] for e in _graph.implied_edges(type("D", (), {"source": "github", "doc_id": "acme/repo#1", "author": "Ada"})())]
+   == ["Ada", "acme/repo"], "implied_edges derives author + repo container from a github doc id")
+gws2 = Workspace(repo("graph"))
+with Store(gws2) as store:
+    for did, auth in [("acme/repo#1", "Ada"), ("acme/repo#2", "Bo"), ("other/x#9", "Ada")]:
+        store.upsert("github", did, title=did, url=None, revision_id=None, body=f"issue {did}",
+                     meta={"author": auth})
+        store.replace_edges("github", did, _graph.implied_edges(store.get("github", did)))
+    rel = store.related("github", "acme/repo#1")
+    ids = {r["doc_id"] for r in rel}
+    ok("acme/repo#2" in ids, "related finds a doc in the same repo container")
+    ok("other/x#9" in ids, "related finds another doc by the same author")
+    ok(all("reason" in r for r in rel), "each related hit carries a reason")
+
+# metadata filters: author + date narrowing on search and recent
+fws = Workspace(repo("filters"))
+with Store(fws) as store:
+    store.upsert("gdocs", "ada1", title="Ada plan", url=None, revision_id=None,
+                 body="roadmap widget alpha planning notes for the next quarter and beyond",
+                 meta={"author": "Ada Lovelace", "modified_at": "2026-06-01T00:00:00Z"})
+    store.upsert("gdocs", "bob1", title="Bob plan", url=None, revision_id=None,
+                 body="roadmap widget alpha planning notes for the next quarter and beyond",
+                 meta={"author": "Bob", "modified_at": "2020-01-01T00:00:00Z"})
+reembed(fws, embed_fn=fake_embed)
+byauthor = hybrid_search(fws, "roadmap widget", author="Ada", embed_query_fn=lambda q: fake_embed([q])[0], k=5)
+ok({h["doc_id"] for h in byauthor} == {"ada1"}, "search --author filters to that author's docs")
+recent_since = recent(fws, since="2025-01-01")
+ok({h["doc_id"] for h in recent_since} == {"ada1"}, "recent --since filters by modified date")
+ok({h["doc_id"] for h in recent(fws, author="Bob")} == {"bob1"}, "recent --author filters by author")
+
 # -- notion + github render (offline fakes) -----------------------------------------------------
 def nfetch(url, headers):
     from urllib.parse import urlparse

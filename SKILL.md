@@ -34,15 +34,29 @@ bean gives you a **toolbox of retrieval commands**. Don't just run one search �
 context the question needs, then compose calls. Every command takes `--json`; prefer it. All accept
 `--source {slack|gdocs|notion|github|localfiles}` to scope by connector.
 
-- **`search "<q>"`** — hybrid semantic + keyword (the default). Keyword fusion means exact tokens
-  (identifiers, error strings, ticket numbers, `#channels`) are found even when not semantically
-  close. Flags: `--doc <substr>` (restrict to docs whose id/title contains it), `--expand N` (pull
-  N neighbouring chunks around each hit), `--k N`.
-- **`recent [--source S] [--doc <substr>]`** — most recently changed docs/messages. For "lately",
-  "this week", "the conversation in #product".
+- **`search "<q>"`** — hybrid semantic + keyword (the default), fused with weighted RRF. Keyword
+  fusion means exact tokens (identifiers, error strings, ticket numbers, `#channels`) are found even
+  when not semantically close. Flags:
+  - `--variant "<q2>"` (repeatable) — **fuse extra query variants** with the main one. This is your
+    lever: pass a paraphrase *and* the raw identifiers you spotted (e.g. main `"how billing works"`
+    plus `--variant "ZQ-9001"`); each variant adds a ranking, weighted-RRF merges them. You are the
+    query-expansion step — bean doesn't call an LLM for it, you do.
+  - `--author <substr>` `--since YYYY-MM-DD` `--before YYYY-MM-DD` — narrow by who/when.
+  - `--doc <substr>` (id/title contains), `--expand N` (neighbouring chunks per hit), `--k N`.
+- **`recent [--source S] [--doc <substr>] [--author <substr>] [--since …] [--before …]`** — most
+  recently changed docs/messages. For "lately", "this week", "what did Ada change".
+- **`related <ref>`** — documents one hop away in the graph: same repo/project/channel or same
+  author, and directly linked docs. Each hit says *why* (`reason`). Use to widen from one doc to its
+  neighbourhood ("what else touches this ticket's project?").
 - **`thread <ref>` / `doc <ref>`** — a whole Slack thread / week digest / document as one block,
   matched by id or title substring. Use when a snippet isn't enough.
 - **`neighbors <chunk-id>`** — the chunks surrounding a specific hit (each hit has an `id`).
+
+Ranking is config-driven (`config set search.*`): `recency_decay` (time-bias toward newer docs),
+`merge_sections` (coalesce adjacent chunks; on by default), `auto_weight` (identifier queries lean
+keyword, questions lean vector), and an optional local `rerank.enabled` cross-encoder. Index-shape
+knobs `chunking.title_prefix` / `chunking.large_chunks` and enabling the reranker take effect after
+a `reembed`.
 
 ### Worked example — "I had a convo in the product channel, what's the impact on my docs?"
 
