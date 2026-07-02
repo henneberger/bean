@@ -10,7 +10,14 @@ dependencies = [
     "lancedb>=0.15",
     "requests>=2.31",
     "fastembed>=0.3",
+    "pymupdf>=1.24",   # born-digital PDF text extraction (OCR is the optional extra below)
 ]
+
+[project.optional-dependencies]
+# OCR toolchain for scanned PDFs (baidu/Unlimited-OCR). You don't need to install this yourself —
+# bean provisions it into its venv the first time ocr.backend = "unlimited-ocr" actually runs
+# (see bean/pdf.py:_provision_ocr). This extra just lets you pre-install it if you'd rather.
+ocr = ["transformers>=4.44", "torch>=2.1", "pillow>=10.0"]
 
 [project.scripts]
 bean = "bean.cli:main"

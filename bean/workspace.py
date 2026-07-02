@@ -3,19 +3,29 @@
 Every repo gets its own folder — <repo-name>-<hash-of-path>/ — holding that repo's config,
 DuckDB catalog, and Lance vector store. Credentials are per USER (shared across repos) at
 ~/.bean/credentials/, mode 0600. Nothing is ever written inside the repo itself.
+
+The home directory defaults to ~/.bean and is set programmatically (never via an environment
+variable) — `set_bean_home()` exists so tests can point everything at a temp dir.
 """
 
 from __future__ import annotations
 
 import hashlib
 import json
-import os
 import re
 from pathlib import Path
 
+_HOME: Path = Path.home() / ".bean"
+
 
 def bean_home() -> Path:
-    return Path(os.environ.get("BEAN_HOME", Path.home() / ".bean"))
+    return _HOME
+
+
+def set_bean_home(path) -> None:
+    """Redirect all bean state to `path` (used by tests and any future `--home`-style option)."""
+    global _HOME
+    _HOME = Path(path)
 
 
 def repo_root(cwd: Path | None = None) -> Path:

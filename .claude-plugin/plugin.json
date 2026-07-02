@@ -1,7 +1,7 @@
 {
   "name": "bean",
   "version": "0.1.0",
-  "description": "Local search over your Google Docs and Slack — /bean <question>, /bean sync, /bean init. No server: your credentials, Lance + DuckDB under ~/.bean.",
+  "description": "Local hybrid search over your Slack, Google Docs, Notion, GitHub, and local files (incl. PDF) — /bean <question>, /bean sync, /bean init. No server: your credentials, Lance + DuckDB under ~/.bean.",
   "author": {
     "name": "Daniel Henneberger"
   }

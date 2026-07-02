@@ -104,12 +104,28 @@ def sync(store: Store, config: dict, *, token: str, team_url: str | None = None,
             if not cursor:
                 return out
 
-    wanted = [str(c).lstrip("#") for c in config.get("channels", [])]
+    def list_channels(types: str) -> list[dict]:
+        return paged("conversations.list", "channels", types=types, exclude_archived="true")
+
+    # Private channels need the `groups:read` scope; degrade to public-only if the token lacks it
+    # rather than failing the whole sync.
+    try:
+        channels = list_channels("public_channel,private_channel")
+    except RuntimeError as err:
+        if "missing_scope" not in str(err):
+            raise
+        log("slack: token lacks groups:read — indexing public channels only")
+        channels = list_channels("public_channel")
+    by_name = {c["name"]: c for c in channels}
+    # Default: index every channel the account is a member of — no per-channel adds. An explicit
+    # channel list (via `bean add #name`) narrows to just those; "*" also means all.
+    raw = [str(c).lstrip("#") for c in config.get("channels", [])]
+    if config.get("all") or not raw or "*" in raw:
+        wanted = [c["name"] for c in by_name.values() if c.get("is_member")]
+    else:
+        wanted = [w for w in raw if w != "*"]
     if not wanted:
         return {"changed": [], "removed": []}
-    by_name = {c["name"]: c for c in paged("conversations.list", "channels",
-                                           types="public_channel,private_channel",
-                                           exclude_archived="true")}
 
     users: dict = store.get_state("slack.users", {})
 

@@ -10,13 +10,16 @@ import re
 import shutil
 import subprocess
 import time
+from datetime import datetime, timedelta, timezone
+from urllib.parse import urlencode
 
 from .http import AuthError, api_get, api_json
 from .store import Store
 from .workspace import load_credential, save_credential
 
 API = "https://www.googleapis.com/drive/v3"
-DOC_FIELDS = "id,name,modifiedTime,headRevisionId,webViewLink,trashed"
+DOC_FIELDS = ("id,name,createdTime,modifiedTime,headRevisionId,webViewLink,trashed,mimeType,"
+              "lastModifyingUser(displayName,emailAddress),owners(displayName,emailAddress)")
 
 
 # -- refs ---------------------------------------------------------------------------------------
@@ -82,8 +85,26 @@ def connected() -> dict | None:
 
 
 # -- sync -----------------------------------------------------------------------------------------
+def _crawl(call, q: str) -> list[str]:
+    """All doc ids matching a Drive query `q`, paged."""
+    ids: list[str] = []
+    page = None
+    while True:
+        params = urlencode({
+            "q": q, "fields": "nextPageToken,files(id)", "pageSize": "100",
+            "corpora": "user", "orderBy": "modifiedTime desc",
+            **({"pageToken": page} if page else {}),
+        })
+        resp = call(f"/files?{params}")
+        ids += [f["id"] for f in resp.get("files", [])]
+        page = resp.get("nextPageToken")
+        if not page:
+            break
+    return ids
+
+
 def sync(store: Store, config: dict, *, token_fn=access_token, fetch=None,
-         full: bool = False, log=lambda m: None) -> dict:
+         full: bool = False, lookback_days: int = 30, log=lambda m: None) -> dict:
     token = token_fn()
 
     def call(path: str, raw: bool = False):
@@ -95,22 +116,26 @@ def sync(store: Store, config: dict, *, token_fn=access_token, fetch=None,
             token = token_fn(True)  # expired mid-sync — refresh once
             return (api_get if raw else api_json)(url, {"Authorization": f"Bearer {token}"}, fetch=fetch)
 
-    # Folders expand to their Google Docs (one level; subfolders are added explicitly).
+    DOC_MIME = "mimeType='application/vnd.google-apps.document' and trashed=false"
+
+    # Explicit adds narrow the scope; with none configured, auto-index the docs you own.
     doc_ids = list(dict.fromkeys(config.get("docs", [])))
     for folder in config.get("folders", []):
-        page = None
-        while True:
-            from urllib.parse import urlencode
-            q = urlencode({
-                "q": f"'{folder}' in parents and mimeType='application/vnd.google-apps.document' and trashed=false",
-                "fields": "nextPageToken,files(id)", "pageSize": "100",
-                **({"pageToken": page} if page else {}),
-            })
-            resp = call(f"/files?{q}")
-            doc_ids += [f["id"] for f in resp.get("files", []) if f["id"] not in doc_ids]
-            page = resp.get("nextPageToken")
-            if not page:
-                break
+        doc_ids += [i for i in _crawl(call, f"'{folder}' in parents and {DOC_MIME}") if i not in doc_ids]
+
+    auto = not config.get("docs") and not config.get("folders")
+    if auto:
+        q = f"'me' in owners and {DOC_MIME}"
+        if lookback_days and lookback_days > 0:
+            cutoff = (datetime.now(timezone.utc) - timedelta(days=lookback_days)).strftime("%Y-%m-%dT%H:%M:%SZ")
+            q += f" and modifiedTime > '{cutoff}'"
+        window = "all time" if not (lookback_days and lookback_days > 0) else f"last {lookback_days}d"
+        found = _crawl(call, q)
+        log(f"gdocs: auto-indexing docs you own ({window}) — {len(found)} in window")
+        doc_ids += [i for i in found if i not in doc_ids]
+        # Retain docs already indexed so aging out of the window doesn't evict them; re-stat below
+        # confirms they still exist and are accessible (trash/access-loss is what removes them).
+        doc_ids += [i for i in store.doc_ids("gdocs") if i not in doc_ids]
 
     changed, seen = [], []
     for doc_id in doc_ids:
@@ -131,7 +156,7 @@ def sync(store: Store, config: dict, *, token_fn=access_token, fetch=None,
             continue
         if store.upsert("gdocs", doc_id, title=meta.get("name", doc_id),
                         url=meta.get("webViewLink"), revision_id=meta.get("headRevisionId"),
-                        body=body):
+                        body=body, meta=_meta(meta)):
             changed.append(doc_id)
             log(f"gdocs: updated \"{meta.get('name', doc_id)}\"")
 
@@ -140,6 +165,17 @@ def sync(store: Store, config: dict, *, token_fn=access_token, fetch=None,
     for doc_id in removed:
         store.delete("gdocs", doc_id)
     return {"changed": changed, "removed": removed}
+
+
+def _meta(meta: dict) -> dict:
+    """Drive file metadata → the store's source-native metadata fields."""
+    who = meta.get("lastModifyingUser") or (meta.get("owners") or [{}])[0]
+    return {
+        "created_at": meta.get("createdTime"),
+        "modified_at": meta.get("modifiedTime"),
+        "author": who.get("displayName") or who.get("emailAddress"),
+        "mime": meta.get("mimeType"),
+    }
 
 
 def _export(call, doc_id: str) -> str | None:

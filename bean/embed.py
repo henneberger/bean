@@ -1,32 +1,34 @@
-"""Embeddings via fastembed (ONNX, CPU-only, no torch). The model downloads once (~100 MB)
-and is cached by fastembed. Everything downstream takes an injectable embed function, so
-tests run with a deterministic fake and never touch the model."""
+"""Embeddings via fastembed (ONNX, CPU-only, no torch).
+
+The model is chosen by config (`embedding.model`), never an environment variable, and its
+weights download automatically the first time an embedding is actually computed — on the first
+`sync`/`search`/`reembed`, not at setup. Models are cached per name, so `bean reembed` can move
+the index onto a different model without a process restart. Everything downstream takes an
+injectable embed function, so tests run with a deterministic fake and never touch a model."""
 
 from __future__ import annotations
 
-import os
-
-DEFAULT_MODEL = os.environ.get("BEAN_EMBED_MODEL", "BAAI/bge-small-en-v1.5")
-
-_model = None
+_models: dict = {}
 
 
-def _load():
-    global _model
-    if _model is None:
-        from fastembed import TextEmbedding  # lazy: import cost + download only when embedding
-        _model = TextEmbedding(model_name=DEFAULT_MODEL)
-    return _model
+def _load(model_name: str):
+    if model_name not in _models:
+        from fastembed import TextEmbedding  # lazy: import + weight download only when embedding
+        _models[model_name] = TextEmbedding(model_name=model_name)
+    return _models[model_name]
 
 
-def embed_texts(texts: list[str]) -> list[list[float]]:
-    """Document-side embeddings."""
-    return [list(map(float, v)) for v in _load().embed(texts)]
+def embedder(model_name: str, batch_size: int = 64):
+    """A (texts -> vectors) callable bound to one model — what sync/reembed pass around."""
+    def embed(texts: list[str]) -> list[list[float]]:
+        model = _load(model_name)
+        return [list(map(float, v)) for v in model.embed(texts, batch_size=batch_size)]
+    return embed
 
 
-def embed_query(text: str) -> list[float]:
+def embed_query(text: str, model_name: str) -> list[float]:
     """Query-side embedding (uses the model's query prefix when it has one)."""
-    model = _load()
+    model = _load(model_name)
     if hasattr(model, "query_embed"):
         return list(map(float, next(iter(model.query_embed([text])))))
-    return embed_texts([text])[0]
+    return [list(map(float, v)) for v in model.embed([text])][0]

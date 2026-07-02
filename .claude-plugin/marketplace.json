@@ -1,0 +1,14 @@
+{
+  "name": "bean",
+  "description": "Local hybrid search over your Slack, Google Docs, Notion, GitHub, and local files — no server, your credentials, your machine.",
+  "owner": { "name": "Daniel Henneberger" },
+  "plugins": [
+    {
+      "name": "bean",
+      "description": "Local hybrid search over your work knowledge, as a Claude Code plugin. /bean <question>, /bean sync, /bean init. Credentials stay yours; Lance + DuckDB under ~/.bean.",
+      "author": { "name": "Daniel Henneberger" },
+      "category": "productivity",
+      "source": "./"
+    }
+  ]
+}
