@@ -112,8 +112,7 @@ finish with `beanw.py sync` and a test `search`.
 ## `sync`
 
 `beanw.py sync [source] [--full] [--since N]` — fetches changes and re-embeds **only what
-changed**. The very first sync downloads the embedding model once (a few minutes; warn them). Add a
-`source` argument to sync just one connector.
+changed**.
 
 **Never run `sync` on your own.** It is the one command you do not run unprompted — it hits the
 user's live services and can take minutes. Run it only when the user explicitly asks. When a

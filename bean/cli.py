@@ -193,7 +193,7 @@ def cmd_init(ws: Workspace, args) -> int:
     print("    this repo's workspace for local ones) and refs into config yourself.")
     print("  (`bean init --json` prints the exact path + fields + scope for every source.)")
     if any_connected:
-        print("\nThen: bean sync   (first sync downloads the embedding model once)")
+        print("\nThen: bean sync ")
         print('Ask:  bean search "how do refunds work?"')
     return 0
 
