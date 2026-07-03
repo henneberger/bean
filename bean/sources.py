@@ -49,18 +49,34 @@ class Source:
         return self._parse_add(item)
 
 
+# Sources with a lookback window (first-sync reach-back; smart cursor after). Default days; the
+# resolved `<source>.lookback_days` setting overrides. Drives the setup prompt (init --json) too.
+LOOKBACK_DEFAULTS = {"slack": 14, "discord": 14, "gdocs": 30}
+
+
+def _lookback(key, cfg, settings):
+    """Connector-level lookback: the source's tracked-config block wins, then the resolved
+    `<key>.lookback_days` setting, then the built-in default."""
+    return cfg.get("lookback_days", settings.get(key, {}).get("lookback_days", LOOKBACK_DEFAULTS[key]))
+
+
 # -- adapters (normalize each module's native signature to the registry contract) ---------------
 def _gdocs_sync(store, cfg, *, settings, fetch, full, since_days, log):
-    lookback = cfg.get("lookback_days", settings.get("gdocs", {}).get("lookback_days", 30))
-    return gdocs.sync(store, cfg, fetch=fetch, full=full, lookback_days=lookback,
+    return gdocs.sync(store, cfg, fetch=fetch, full=full, lookback_days=_lookback("gdocs", cfg, settings),
                       ocr=settings.get("ocr", {}), log=log)
+
+
+def _discord_sync(store, cfg, *, settings, fetch, full, since_days, log):
+    cfg = {**cfg, "lookback_days": _lookback("discord", cfg, settings)}
+    return discord.sync(store, cfg, settings=settings, fetch=fetch, full=full,
+                        since_days=since_days, log=log)
 
 
 def _slack_sync(store, cfg, *, settings, fetch, full, since_days, log):
     cred = load_credential("slack")
     if not cred:
         raise RuntimeError("not connected — run `bean auth slack --token xoxp-…`.")
-    cfg = {**cfg, "lookback_days": cfg.get("lookback_days", settings.get("slack", {}).get("lookback_days", 14))}
+    cfg = {**cfg, "lookback_days": _lookback("slack", cfg, settings)}
     return slack.sync(store, cfg, token=cred["token"], team_url=cred.get("url"),
                       fetch=fetch, full=full, since_days=since_days, log=log)
 
@@ -121,7 +137,7 @@ CORE_SOURCES: list[Source] = [
            add_help="ms:file:<itemId>, ms:mail:inbox, or ms:teams:<teamId>/<channelId>",
            auth_help="(device-code by default, or --method az to reuse the az CLI)",
            connect=microsoft.connect, connected=microsoft.connected, interactive_auth=True),
-    Source("discord", "discord", "Discord", ("channels", "guilds"), discord.sync, discord.parse_add,
+    Source("discord", "discord", "Discord", ("channels", "guilds"), _discord_sync, discord.parse_add,
            auth="discord", add_help="a discord.com/channels/<guild>/<channel> URL, discord:<channelId>, or discord:guild:<guildId>",
            auth_help="--token <bot-token>",
            connect=discord.connect, connected=discord.connected),

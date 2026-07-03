@@ -221,8 +221,8 @@ with Store(Workspace(repo("gdocs-pdf"))) as store:
     ok(sp2["changed"] == [] and calls["n"] == 1, "unchanged PDF revision skips re-download and re-extract")
 
 # auto-index: empty config crawls the docs you own; the query carries an ownership + window filter
-autodocs = {"m1": {"name": "Owned One", "rev": "a1", "body": "alpha", "md": True},
-            "m2": {"name": "Owned Two", "rev": "a2", "body": "beta", "md": True}}
+autodocs = {"m1": {"name": "Owned One", "rev": "a1", "body": "alpha", "md": True, "mod": "2026-03-01T00:00:00Z"},
+            "m2": {"name": "Owned Two", "rev": "a2", "body": "beta", "md": True, "mod": "2026-04-01T00:00:00Z"}}
 seen_q = {}
 
 
@@ -235,8 +235,8 @@ def afetch(url, headers):
     m = re.match(r"^/drive/v3/files/([^/]+)(/export)?$", u.path)
     d = autodocs[m.group(1)]
     if not m.group(2):
-        return res(200, {"id": m.group(1), "name": d["name"], "headRevisionId": d["rev"],
-                         "webViewLink": f"https://docs.google.com/document/d/{m.group(1)}", "trashed": False})
+        return res(200, {"id": m.group(1), "name": d["name"], "headRevisionId": d["rev"], "trashed": False,
+                         "webViewLink": f"https://docs.google.com/document/d/{m.group(1)}", "modifiedTime": d["mod"]})
     return res(200, d["body"])
 
 
@@ -245,6 +245,14 @@ with Store(aws) as store:
     sa = gdocs.sync(store, {}, token_fn=lambda force=False: "tok", fetch=afetch, lookback_days=30)
     ok(sorted(sa["changed"]) == ["m1", "m2"], "empty config auto-indexes owned docs")
     ok("'me' in owners" in seen_q["q"] and "modifiedTime >" in seen_q["q"], "auto query filters by owner + window")
+    ok(store.get_state("gdocs.cursor") == "2026-04-01T00:00:00Z", "first sync records the newest modifiedTime as the cursor")
+    # smart lookback: the next sync's discovery query starts from the cursor, not the fixed window
+    sa2 = gdocs.sync(store, {}, token_fn=lambda force=False: "tok", fetch=afetch, lookback_days=30)
+    ok("modifiedTime > '2026-04-01T00:00:00Z'" in seen_q["q"], "second sync discovers only files changed since the cursor")
+    # --full ignores the cursor and reaches back over the lookback window again
+    gdocs.sync(store, {}, token_fn=lambda force=False: "tok", fetch=afetch, lookback_days=30, full=True)
+    ok("modifiedTime > '2026-04-01T00:00:00Z'" not in seen_q["q"], "--full ignores the cursor")
+
     # a later crawl that no longer returns m2 still retains it (only trash/access-loss evicts)
     def afetch2(url, headers):
         from urllib.parse import urlparse
@@ -344,6 +352,21 @@ ok(merged["embedding"]["model"] == "custom/model" and merged["chunking"]["lines"
 g = cfgmod.load_global(); cfgmod.set_in(g, "chunking.lines", "20"); cfgmod.set_in(g, "search.hybrid", "true")
 ok(g["chunking"]["lines"] == 20 and g["search"]["hybrid"] is True, "config set coerces to leaf type")
 cfgmod.save_global({})  # reset so downstream resolves to defaults
+
+# -- lookback: connector-level config + setup prompt schema -------------------------------------
+from bean.cli import _init_payload  # noqa: E402
+from bean.sources import LOOKBACK_DEFAULTS, _lookback  # noqa: E402
+ok(LOOKBACK_DEFAULTS == {"slack": 14, "discord": 14, "gdocs": 30}, "lookback sources: slack, discord, gdocs")
+ok(_lookback("discord", {}, {}) == 14, "lookback falls back to the built-in default")
+ok(_lookback("discord", {}, {"discord": {"lookback_days": 3}}) == 3, "resolved setting overrides the default")
+ok(_lookback("discord", {"lookback_days": 5}, {"discord": {"lookback_days": 3}}) == 5,
+   "tracked-config lookback wins over the setting")
+_payload = _init_payload(Workspace(repo("lb")))
+_by = {s["key"]: s for s in _payload["sources"]}
+ok(_by["gdocs"]["lookback"]["config_key"] == "gdocs.lookback_days" and _by["gdocs"]["lookback"]["days"] == 30,
+   "init schema surfaces the gdocs lookback prompt")
+ok(_by["slack"]["lookback"] and _by["discord"]["lookback"], "slack + discord carry a lookback prompt too")
+ok(_by["github"]["lookback"] is None and _by["notion"]["lookback"] is None, "sources without a window have no prompt")
 
 # -- source routing -----------------------------------------------------------------------------
 ok(route_add("#eng")[0].key == "slack", "#channel routes to slack")

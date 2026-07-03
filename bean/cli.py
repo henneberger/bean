@@ -129,6 +129,8 @@ def _init_payload(ws: Workspace) -> dict:
     lists hold tracked refs, and its scope (global = all repos, local = this repo)."""
     scopes, repo_cfg, glob_cfg, gws = _scope_ctx(ws)
     from .workspace import bean_home
+    from .sources import LOOKBACK_DEFAULTS
+    settings = cfgmod.resolve(ws)
     sources = []
     for s in SOURCES:
         scope = scopes.get(s.key, "local")
@@ -136,6 +138,14 @@ def _init_payload(ws: Workspace) -> dict:
         cred_ws = None if scope == "global" else ws
         with credential_context(cred_ws):
             conn = s.connected() if s.connected else None
+        # Sources with a lookback window get a setup prompt: how far back the first sync reaches.
+        lb = None
+        if s.key in LOOKBACK_DEFAULTS:
+            current = (cfg.get(s.config_key) or {}).get("lookback_days",
+                       settings.get(s.key, {}).get("lookback_days", LOOKBACK_DEFAULTS[s.key]))
+            lb = {"days": current, "default": LOOKBACK_DEFAULTS[s.key],
+                  "config_key": f"{s.key}.lookback_days",
+                  "prompt": "how many days of history to index on the first sync (0 = all)"}
         sources.append({
             "key": s.key, "label": s.label, "scope": scope,
             "auth": s.auth, "interactive_auth": s.interactive_auth,
@@ -149,6 +159,7 @@ def _init_payload(ws: Workspace) -> dict:
             "tracked": _tracked(cfg, s),
             "scope_command": f"bean scope {s.key} global|local",
             "always_when_connected": s.always_when_connected,
+            "lookback": lb,
         })
     return {"workspace": str(ws.dir), "repo": str(ws.repo),
             "global_workspace": str(gws.dir), "scopes_path": str(bean_home() / "scopes.json"),

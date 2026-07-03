@@ -109,6 +109,14 @@ prompt instead of taking a token. Whole-collection sources (`always_when_connect
 Zendesk, Salesforce…) index everything once connected; tracked lists only *narrow* scope. Then
 finish with `beanw.py sync` and a test `search`.
 
+**Lookback — ask when a source has one.** Sources with a `lookback` block in `init --json` (Slack,
+Discord, Google Drive) reach back a bounded window on the *first* sync, then track a cursor and only
+re-scan changes after that. When setting one up, ask the user the source's `lookback.prompt` (e.g.
+"how many days of history should I index on the first sync? 0 = all") and, if they give a number
+other than the `lookback.default`, set it with `beanw.py config set <lookback.config_key> <days>`
+(e.g. `config set slack.lookback_days 30`) before the first `sync`. It only bounds the initial
+backfill; later syncs are incremental regardless.
+
 ## `sync`
 
 `beanw.py sync [source] [--full] [--since N]` — fetches changes and re-embeds **only what

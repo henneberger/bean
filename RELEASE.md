@@ -67,6 +67,13 @@ make clean                                     # remove dist/ build/ *.egg-info 
 Newest first. Dates are the tag date.
 
 ### Unreleased
+- **Smart lookback windows** — lookback is now a per-connector setting for every source that has a
+  window (`slack`/`discord`/`gdocs`.`lookback_days`), resolved connector-first then from settings.
+  Google Drive gained a cursor (like Slack/Discord already had): the first sync reaches back
+  `lookback_days`, later syncs discover only files changed since the last one. `init --json` now
+  carries a `lookback` block per windowed source so setup can prompt for the initial reach-back.
+- **README** — install command up top (`/plugin marketplace add` + `/plugin install`); dropped the
+  Development section; Notion no longer listed in the connector table.
 - **Google Drive PDFs** — the Drive connector now indexes native PDFs (owned files + tracked
   folders), downloaded and run through the shared PDF extractor (`bean/pdf.py`, honoring
   `ocr.backend`) — the same path local-file PDFs use. Adds a `content` bytes carrier to the HTTP

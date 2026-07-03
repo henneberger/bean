@@ -6,9 +6,16 @@ Code plugin.
 You already pay for a Claude plan, why pay again for API calls? Or hand your docs to yet another
 LLM-wrapper SaaS? Not ready to drop $100k on search? Use Bean, it has no server: bean pulls with your own credentials, embeds on your machine, and stores everything locally.
 
-## Use it from Claude Code
+## Install
 
-Install the plugin (this repo), then:
+In Claude Code, add this repo as a plugin marketplace and install it:
+
+```
+/plugin marketplace add henneberger/bean
+/plugin install bean@bean
+```
+
+## Use it from Claude Code
 
 ```
 /bean init                     # connect sources — a guided conversation
@@ -20,7 +27,7 @@ Install the plugin (this repo), then:
 `/bean` is not one search. Claude picks from a toolbox — hybrid `search`, `recent`, whole-`thread`
 or `doc` pull, graph `related`, `neighbors` — and composes them. Ask *"I had a convo in the product
 channel, what's the impact on my docs?"* and it grabs the recent Slack conversation, pulls the
-topics out, then searches your Google Docs and Notion for what those topics touch.
+topics out, then searches your Google Docs for what those topics touch.
 
 ## Try asking
 
@@ -41,15 +48,12 @@ Under the hood these map to `search` (with `--variant`, `--author`, `--since`, `
 
 ## Connectors
 
-| Source | Auth | What it indexes |
-|--------|------|-----------------|
-bean ships **12 core connectors**, always on:
+bean ships **11 core connectors**, always on:
 
 | Source | Auth | What it indexes |
 |--------|------|-----------------|
 | **Slack** | user token (`xoxp-…`) | channels, cut into per-week digests with threads as sections |
 | **Google Drive** | gcloud sign-in | Docs as Markdown and PDFs (extracted); whole Drive folders |
-| **Notion** | integration token | pages and their nested blocks |
 | **GitHub** | personal access token | issues and pull requests (body + comments) |
 | **Confluence** | Cloud (email + API token) or Server/DC (PAT) | space pages (storage HTML → text) |
 | **Jira** | Cloud (email + API token) or Server/DC (PAT) | project issues + comments |
@@ -154,8 +158,9 @@ Changing an **index-shape** knob (embedding model, any `chunking.*`, enabling `r
 | `graph.enabled` | `true` | build the `related` edge index during sync |
 | `sync.stale_days` | `7` | warn (never auto-sync) when the index is older than this; 0 = off |
 | `ocr.backend` / `model` / `dpi` | `auto` / `baidu/Unlimited-OCR` / `200` | PDF text backend (below) |
-| `slack.lookback_days` | `14` | recent Slack history re-fetched each sync to catch edits |
-| `gdocs.lookback_days` | `30` | window for auto-indexing Docs + PDFs you own (0 = all) |
+| `slack.lookback_days` | `14` | how far the first Slack sync reaches back; later syncs re-fetch this window to catch edits |
+| `discord.lookback_days` | `14` | same rolling window for Discord channel digests |
+| `gdocs.lookback_days` | `30` | how far the first Drive sync reaches; later syncs discover only files changed since (cursor). 0 = all |
 
 The embedding model downloads automatically the first time you actually sync or search — not at
 setup — and is cached afterward.
@@ -187,7 +192,7 @@ none.
   different GitHub token per project just works), with the shared dir as a fallback. All mode 0600,
   never inside a repo.
 - **Auth.** Google rides on gcloud's own pre-verified OAuth client, so nobody sets up a GCP
-  project. Slack, Notion, and GitHub take a token you paste once.
+  project. Slack and GitHub take a token you paste once.
 
 ## Limits worth knowing
 
@@ -195,16 +200,4 @@ none.
   back to plain text.
 - Slack edits older than the lookback window (14 days) are missed by design; `sync --full`
   re-fetches everything within `--since` days (default 90).
-- Notion database *queries* need a POST endpoint bean doesn't use yet — add the individual pages
-  for now (see the connector backlog).
 - GitHub syncs issues/PRs incrementally by `updated_at`; a removed repo prunes everything under it.
-
-## Development
-
-```
-python3 -m venv .venv && .venv/bin/pip install -e .
-.venv/bin/python tests/test_bean.py    # offline: fake HTTP, fake embedder, real DuckDB + Lance
-```
-
-The test suite fakes every network call and the embedder, so it runs offline and touches no model.
-`set_bean_home()` points all state at a temp dir — there is no `BEAN_HOME` environment variable.

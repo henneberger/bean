@@ -133,19 +133,29 @@ def sync(store: Store, config: dict, *, token_fn=access_token, fetch=None,
 
     auto = not config.get("docs") and not config.get("folders")
     if auto:
-        q = f"'me' in owners and {INDEXABLE_MIME}"
-        if lookback_days and lookback_days > 0:
+        # Smart lookback: after the first sync we remember the newest modifiedTime we saw and only
+        # discover files changed since (the cursor). The first sync (or --full) has no cursor, so it
+        # reaches back `lookback_days`. Already-indexed files are re-stat'd below regardless, so edits
+        # to known files are never missed — the window only bounds discovery of *new* files.
+        cursor = None if full else store.get_state("gdocs.cursor")
+        if cursor:
+            cutoff, window = cursor, f"since {cursor}"
+        elif lookback_days and lookback_days > 0:
             cutoff = (datetime.now(timezone.utc) - timedelta(days=lookback_days)).strftime("%Y-%m-%dT%H:%M:%SZ")
+            window = f"last {lookback_days}d"
+        else:
+            cutoff, window = None, "all time"
+        q = f"'me' in owners and {INDEXABLE_MIME}"
+        if cutoff:
             q += f" and modifiedTime > '{cutoff}'"
-        window = "all time" if not (lookback_days and lookback_days > 0) else f"last {lookback_days}d"
         found = _crawl(call, q)
-        log(f"gdocs: auto-indexing files you own ({window}) — {len(found)} in window")
+        log(f"gdocs: auto-indexing files you own ({window}) — {len(found)} new/changed")
         doc_ids += [i for i in found if i not in doc_ids]
         # Retain docs already indexed so aging out of the window doesn't evict them; re-stat below
         # confirms they still exist and are accessible (trash/access-loss is what removes them).
         doc_ids += [i for i in store.doc_ids("gdocs") if i not in doc_ids]
 
-    changed, seen = [], []
+    changed, seen, newest_mod = [], [], store.get_state("gdocs.cursor") if auto else None
     for doc_id in doc_ids:
         try:
             meta = call(f"/files/{doc_id}?fields={DOC_FIELDS}")
@@ -155,6 +165,9 @@ def sync(store: Store, config: dict, *, token_fn=access_token, fetch=None,
         if meta.get("trashed"):
             continue
         seen.append(doc_id)
+        mt = meta.get("modifiedTime")
+        if auto and mt and (newest_mod is None or mt > newest_mod):
+            newest_mod = mt  # advance the discovery cursor to the newest file we've seen
         existing = store.get("gdocs", doc_id)
         if not full and existing and existing.revision_id and existing.revision_id == meta.get("headRevisionId"):
             continue
@@ -172,6 +185,9 @@ def sync(store: Store, config: dict, *, token_fn=access_token, fetch=None,
                         body=body, meta=_meta(meta)):
             changed.append(doc_id)
             log(f"gdocs: updated \"{meta.get('name', doc_id)}\"")
+
+    if auto and newest_mod:
+        store.set_state("gdocs.cursor", newest_mod)
 
     # Docs that fell out of the configured set (untracked, trashed, access lost) leave the index.
     removed = [d for d in store.doc_ids("gdocs") if d not in seen]
