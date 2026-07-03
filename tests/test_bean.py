@@ -630,6 +630,35 @@ for _k in ("github", "slack"):
     _gc.pop(_k, None)
 _gws.save_config(_gc)
 
+# == per-workspace credentials: local connectors get their own; global share; fallback ==========
+from bean.workspace import credential_context, credential_path  # noqa: E402
+import stat as _stat  # noqa: E402
+wa, wb = Workspace(repo("cred-a")), Workspace(repo("cred-b"))
+with credential_context(wa):
+    save_credential("github", {"token": "AAA"})
+with credential_context(wb):
+    save_credential("github", {"token": "BBB"})
+with credential_context(wa):
+    ok(load_credential("github")["token"] == "AAA", "repo A sees its own github credential")
+with credential_context(wb):
+    ok(load_credential("github")["token"] == "BBB", "repo B sees a different github credential")
+# a shared credential falls through to any local workspace that lacks its own
+save_credential("sharedsvc", {"token": "SHARED"})  # no context -> shared dir
+with credential_context(wa):
+    ok(load_credential("sharedsvc")["token"] == "SHARED", "shared credential falls through to a local ws")
+with credential_context(wa):
+    save_credential("sharedsvc", {"token": "LOCAL_A"})  # ...but a local one shadows it
+with credential_context(wa):
+    ok(load_credential("sharedsvc")["token"] == "LOCAL_A", "workspace credential shadows the shared one")
+with credential_context(wb):
+    ok(load_credential("sharedsvc")["token"] == "SHARED", "another workspace still sees the shared one")
+with credential_context(Workspace.global_()):
+    ok(load_credential("sharedsvc")["token"] == "SHARED", "a global-scope context reads the shared dir")
+ok("cred-a" in str(credential_path("github", wa)), "credential_path is workspace-scoped for a local ws")
+ok("cred-a" not in str(credential_path("slack", None)), "credential_path is the shared dir for a global connector")
+_pa = wa.dir / "credentials" / "github.json"
+ok(_pa.exists() and _stat.S_IMODE(_pa.stat().st_mode) == 0o600, "local credential stored in the workspace, mode 0600")
+
 # -- notion + github render (offline fakes) -----------------------------------------------------
 def nfetch(url, headers):
     from urllib.parse import urlparse

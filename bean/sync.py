@@ -61,7 +61,10 @@ def run_sync(ws: Workspace, *, only: str | None = None, keys: set | None = None,
     changed: list[tuple[str, str]] = []
     removed: list[tuple[str, str]] = []
     errors: list[str] = []
-    with Store(ws) as store:
+    from .workspace import credential_context
+    # Local sources read this repo's credentials (fallback shared); global sources read the shared.
+    cred_ws = None if getattr(ws, "is_global", False) else ws
+    with credential_context(cred_ws), Store(ws) as store:
         for src in SOURCES:
             if only and only != src.key:
                 continue

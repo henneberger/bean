@@ -30,7 +30,8 @@ from .search import (document_many, neighbors_many, recent_many, related_many, s
                      thread_many)
 from .sources import BY_KEY, SOURCES, route_add
 from .store import Store
-from .workspace import Workspace, load_scopes, set_source_scope, source_scope
+from .workspace import (Workspace, credential_context, credential_path, load_scopes,
+                        set_source_scope, source_scope)
 
 SOURCE_KEYS = [s.key for s in SOURCES]
 AUTH = {s.auth: s for s in SOURCES if s.auth}
@@ -132,12 +133,14 @@ def _init_payload(ws: Workspace) -> dict:
     for s in SOURCES:
         scope = scopes.get(s.key, "local")
         cfg, cfgws = (glob_cfg, gws) if scope == "global" else (repo_cfg, ws)
-        conn = s.connected() if s.connected else None
+        cred_ws = None if scope == "global" else ws
+        with credential_context(cred_ws):
+            conn = s.connected() if s.connected else None
         sources.append({
             "key": s.key, "label": s.label, "scope": scope,
             "auth": s.auth, "interactive_auth": s.interactive_auth,
             "connected": bool(conn) if s.auth else None,
-            "credential_path": str(_cred_path(s.auth)) if s.auth else None,
+            "credential_path": str(credential_path(s.auth, cred_ws)) if s.auth else None,
             "credential_fields": s.auth_help or ("token" if s.auth else None),
             "auth_command": (None if not s.auth else
                              f"bean auth {s.auth}" + ("" if s.interactive_auth else f" {s.auth_help}".rstrip())),
@@ -162,7 +165,8 @@ def cmd_init(ws: Workspace, args) -> int:
     for s in SOURCES:
         scope = scopes.get(s.key, "local")
         cfg = glob_cfg if scope == "global" else repo_cfg
-        conn = s.connected() if s.connected else {"local": True}
+        with credential_context(None if scope == "global" else ws):
+            conn = s.connected() if s.connected else {"local": True}
         tracked = _tracked(cfg, s)
         mark = "x" if (conn and (tracked or s.always_when_connected)) else " "
         if conn:
@@ -185,8 +189,9 @@ def cmd_init(ws: Workspace, args) -> int:
     print("\nSetup is assistant-guided. For each source you want, either:")
     print("  • paste the token and let the assistant run the command / write the files, or")
     print("  • run the printed `bean auth …` yourself (token never leaves your machine), or")
-    print(f"  • write the credential JSON to {_cred_path('<provider>')} and refs into config yourself.")
-    print("  (`bean init --json` prints the exact paths + fields + scope for every source.)")
+    print("  • write the credential JSON to its `credential_path` (shared dir for global connectors,")
+    print("    this repo's workspace for local ones) and refs into config yourself.")
+    print("  (`bean init --json` prints the exact path + fields + scope for every source.)")
     if any_connected:
         print("\nThen: bean sync   (first sync downloads the embedding model once)")
         print('Ask:  bean search "how do refunds work?"')
@@ -209,7 +214,8 @@ def cmd_status(ws: Workspace, args) -> int:
         scope = scopes.get(s.key, "local")
         cfg = glob_cfg if scope == "global" else repo_cfg
         counts = gc if scope == "global" else rc
-        conn = s.connected() if s.connected else {"local": True}
+        with credential_context(None if scope == "global" else ws):
+            conn = s.connected() if s.connected else {"local": True}
         node = cfg.get(s.config_key) or {}
         sources[s.key] = {"connected": bool(conn), "scope": scope, "tracked": _tracked(cfg, s),
                           "indexed": counts.get(s.key, 0),
@@ -244,15 +250,19 @@ def cmd_auth(ws: Workspace, args) -> int:
     fields = {k: getattr(args, k, None) for k in
               ("token", "url", "email", "subdomain", "key", "secret", "method")}
     kwargs = {k: v for k, v in fields.items() if v}
+    # Save the credential to this source's scope: a local connector's cred lives in this repo's
+    # workspace (so a different token per project works); a global connector's is shared.
+    cred_ws = None if source_scope(src.key) == "global" else ws
     try:
-        if src.interactive_auth and not kwargs:
-            src.connect()  # browser / device-code flow, no secrets on the command line
-        else:
-            if not kwargs and not src.interactive_auth:
-                print(f"Usage: bean auth {args.provider} --token <token> {src.auth_help}".rstrip(),
-                      file=sys.stderr)
-                return 2
-            src.connect(**kwargs)
+        with credential_context(cred_ws):
+            if src.interactive_auth and not kwargs:
+                src.connect()  # browser / device-code flow, no secrets on the command line
+            else:
+                if not kwargs and not src.interactive_auth:
+                    print(f"Usage: bean auth {args.provider} --token <token> {src.auth_help}".rstrip(),
+                          file=sys.stderr)
+                    return 2
+                src.connect(**kwargs)
     except Exception as err:
         print(f"✗ {err}", file=sys.stderr)
         return 1
@@ -337,6 +347,17 @@ def cmd_scope(ws: Workspace, args) -> int:
         ocfg[src.config_key][name] = []
     old_ws.save_config(ocfg)
     new_ws.save_config(ncfg)
+    # Move the credential to the new scope's location (global = shared dir; local = repo workspace).
+    if src.auth:
+        from .workspace import bean_home
+        old_cdir = (bean_home() if old == "global" else ws.dir) / "credentials"
+        new_cdir = (bean_home() if new == "global" else ws.dir) / "credentials"
+        old_cred = old_cdir / f"{src.auth}.json"
+        if old_cred.exists() and old_cdir != new_cdir:
+            new_cdir.mkdir(parents=True, exist_ok=True); new_cdir.chmod(0o700)
+            new_cred = new_cdir / f"{src.auth}.json"
+            old_cred.replace(new_cred)
+            new_cred.chmod(0o600)
     from .index import delete_doc  # purge old index (DuckDB + Lance) so a resync repopulates
     with Store(old_ws) as store:
         for d in store.doc_ids(key):

@@ -180,8 +180,10 @@ none.
   as the single copy. There is no chunk mirror — keyword search, neighbours, and section-merge run
   as DuckDB SQL **directly over the Lance dataset** (register + query), so DuckDB stays the
   relational engine while chunk data lives once. Workspaces live at `~/.bean/<repo-name>-<hash>/`
-  (global connectors share `~/.bean/_global/`); credentials stay per user at `~/.bean/credentials/`
-  (mode 0600), never inside a repo.
+  (global connectors share `~/.bean/_global/`). Credentials follow scope: a **global** connector's
+  is shared at `~/.bean/credentials/`; a **local** connector's lives in that repo's workspace (so a
+  different GitHub token per project just works), with the shared dir as a fallback. All mode 0600,
+  never inside a repo.
 - **Auth.** Google rides on gcloud's own pre-verified OAuth client, so nobody sets up a GCP
   project. Slack, Notion, and GitHub take a token you paste once.
 
