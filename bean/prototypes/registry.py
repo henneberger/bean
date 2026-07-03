@@ -6,7 +6,7 @@ core registry back in — no import cycle.
 
 To promote a prototype to a real connector, move its module up into `bean/` and add a row to
 `CORE_SOURCES` in `sources.py`; to ship your own, drop a module exposing `SOURCE` into
-~/.bean/plugins/ (see the `bean-connector` skill)."""
+~/.bean/plugins/ (see `docs/authoring-connectors.md`)."""
 
 from __future__ import annotations
 

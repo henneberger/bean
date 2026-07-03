@@ -45,8 +45,9 @@ Basic vs Bearer by `--secret` vs `--token`.
 
 ## Authoring a connector (plugin)
 
-For a source bean has no connector for, write one. Invoke the **`bean-connector` skill**
-([`skills/bean-connector/`](../../skills/bean-connector/)) for the full guide; the short version:
+For a source bean has no connector for, write one. See
+[`authoring-connectors.md`](authoring-connectors.md) for the full guide + a template; the short
+version:
 
 A connector is one module exposing four callables plus a `SOURCE`, dropped into `~/.bean/plugins/`:
 

@@ -78,9 +78,9 @@ Jira, Zendesk, Salesforce, HubSpot, Microsoft 365, Discord, and local files — 
 
 **Need a source that isn't core?** ~45 more (Linear, GitLab, Gmail, Asana, Zulip, Airtable, Dropbox,
 web/RSS, SQL, …) ship as **prototypes**: `beanw.py plugins list` shows them; `beanw.py plugins enable
-<name>` turns one on. For a source bean has *no* connector for, author one — invoke the
-**`bean-connector` skill**, which walks you through writing an offline-tested plugin dropped into
-`~/.bean/plugins/`.
+<name>` turns one on. For a source bean has *no* connector for, author one — read
+`${CLAUDE_PLUGIN_ROOT}/docs/authoring-connectors.md`, which walks you through writing an
+offline-tested plugin dropped into `~/.bean/plugins/`.
 
 **Scope — ask this for every connector you set up.** A connector is either **global** (indexed once,
 searchable from every repo — e.g. Slack, your personal Google Drive, Gmail) or **local** (scoped to
@@ -142,6 +142,7 @@ ref, so you don't specify it.
 - `beanw.py plugins enable <name>` / `disable <name>` — turn a prototype on/off (writes the global
   config's `plugins.prototypes`). After enabling, set it up like any source (`init --json` now lists
   it) and `sync`.
-- **A source with no bundled connector?** Author one: invoke the **`bean-connector` skill** for the
-  contract, helpers, an offline test recipe, and a template. It produces a self-contained module you
-  drop into `~/.bean/plugins/` — bean loads anything there exposing a `SOURCE`. No core edits.
+- **A source with no bundled connector?** Author one: read
+  `${CLAUDE_PLUGIN_ROOT}/docs/authoring-connectors.md` for the contract, helpers, an offline test
+  recipe, and a template. It produces a self-contained module you drop into `~/.bean/plugins/` —
+  bean loads anything there exposing a `SOURCE`. No core edits.

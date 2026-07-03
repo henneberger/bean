@@ -77,9 +77,10 @@ bean plugins enable linear
 ```
 
 **Need a source bean doesn't have?** Author a connector — a single offline-testable module dropped
-into `~/.bean/plugins/`. The **`bean-connector` skill** walks Claude through the contract, helpers,
-a test recipe, and a template; the ~45 prototypes in [`bean/prototypes/`](bean/prototypes/) are
-worked examples across every API shape. See [docs/connectors.md](docs/connectors.md).
+into `~/.bean/plugins/`. [`docs/authoring-connectors.md`](docs/authoring-connectors.md) walks Claude
+through the contract, helpers, a test recipe, and a template; the ~45 prototypes in
+[`bean/prototypes/`](bean/prototypes/) are worked examples across every API shape. See also
+[docs/connectors.md](docs/connectors.md).
 
 ### Global vs local scope
 

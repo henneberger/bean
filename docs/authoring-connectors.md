@@ -1,30 +1,27 @@
----
-name: bean-connector
-description: Author a new bean connector (a plugin) so a source bean doesn't ship — an internal API, a niche SaaS, a database — becomes searchable. Use when the user wants to connect a source not in `bean plugins list`, adapt a prototype, or asks "can bean index <X>". Produces one offline-testable module dropped into ~/.bean/plugins/.
-version: 0.1.0
-allowed-tools: Bash, Read, Write, Edit
----
-
 # Authoring a bean connector
+
+> Reference doc for writing a connector bean doesn't ship. The main `bean` skill points here when a
+> user asks to connect a source that isn't in `bean plugins list`. This is a guide, not a separate
+> slash command.
 
 A connector is **one Python module** exposing four callables and a `SOURCE`. Drop it in
 `~/.bean/plugins/` and it's live — no core edits. bean ships 12 core connectors; ~45 more live in
 `bean/prototypes/` as worked examples you can read or copy. Your job: write the module, test it
 offline, install it.
 
-**Before writing, read 1–2 prototypes whose shape matches** (`bean/prototypes/<name>.py`):
+**Before writing, read 1–2 prototypes whose shape matches:**
 
 | Source shape | Read | Notes |
 |---|---|---|
-| REST list + item + comments | `linear.py`, `asana.py`, `gitlab.py` | issues/tasks/cards → one doc each |
-| Wiki / KB (HTML bodies) | `guru.py`, `bookstack.py`, `../confluence.py` | `html_to_text` the body |
-| Whole-collection (index everything) | `servicenow.py`, `intercom.py` | `always_when_connected`, never prune |
-| Chat (per-week digests) | `zulip.py`, `../discord.py` | reuse `bean.slack.iso_week` / `week_start` |
-| GraphQL / POST API | `slab.py`, `fireflies.py`, `linear.py` | `api_json_post` |
-| Files (office/pdf) | `dropbox.py`, `buckets.py` | temp-file → `extract_office`/`extract_pdf` |
-| Rows / tables | `sqldb.py`, `airtable.py` | render fields as `key: value` |
-| CLI/OAuth-minted token | `gmail.py`, `../microsoft.py` | injectable `token_fn=` for offline tests |
-| No-auth fetch | `web.py`, `rss.py` | `auth=None`, no `connect` |
+| REST list + item + comments | `bean/prototypes/{linear,asana,gitlab}.py` | issues/tasks/cards → one doc each |
+| Wiki / KB (HTML bodies) | `bean/prototypes/{guru,bookstack}.py`, `bean/confluence.py` | `html_to_text` the body |
+| Whole-collection (index everything) | `bean/prototypes/{servicenow,intercom}.py` | `always_when_connected`, never prune |
+| Chat (per-week digests) | `bean/prototypes/zulip.py`, `bean/discord.py` | reuse `bean.slack.iso_week` / `week_start` |
+| GraphQL / POST API | `bean/prototypes/{slab,fireflies,linear}.py` | `api_json_post` |
+| Files (office/pdf) | `bean/prototypes/{dropbox,buckets}.py` | temp-file → `extract_office`/`extract_pdf` |
+| Rows / tables | `bean/prototypes/{sqldb,airtable}.py` | render fields as `key: value` |
+| CLI/OAuth-minted token | `bean/prototypes/gmail.py`, `bean/microsoft.py` | injectable `token_fn=` for offline tests |
+| No-auth fetch | `bean/prototypes/{web,rss}.py` | `auth=None`, no `connect` |
 
 ## The contract
 
@@ -75,7 +72,7 @@ from bean.sources import Source
 
 ## Write it — start from the template
 
-Copy `template.py` (next to this skill) to `~/.bean/plugins/<name>.py` and fill it in. Or copy a
+Copy [`docs/connector-template.py`](connector-template.py) to `~/.bean/plugins/<name>.py` and fill it in. Or copy a
 matching prototype. Keep it self-contained.
 
 ## Test it offline (do this before installing)

@@ -6,7 +6,7 @@ bean ships a small, verified **core** set. Everything else is a prototype (see `
 or a user plugin (a drop-in module under ~/.bean/plugins/), discovered at import by `plugins.py`.
 `localfiles` is always registered LAST so it stays the path catch-all. Adding a connector is: write
 its module, then either append a core row here, enable a prototype by name, or ship a plugin — see
-the `bean-connector` skill."""
+`docs/authoring-connectors.md`."""
 
 from __future__ import annotations
 

@@ -9,7 +9,7 @@ connectors (but before `localfiles`, which stays the path catch-all):
      paths in `plugins.paths`). A plugin module exposes ONE of: a `SOURCE` (a Source), a `SOURCES`
      list, or a `register() -> Source | list[Source]`. It builds those with
      `from bean.sources import Source` and calls the same `bean.http`/`bean.store` helpers the
-     bundled connectors do. See the `bean-connector` skill for the authoring guide + template.
+     bundled connectors do. See `docs/authoring-connectors.md` for the authoring guide + template.
 
 A broken prototype name or plugin file is logged and skipped — it never takes down the registry."""
 

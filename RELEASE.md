@@ -78,7 +78,7 @@ Newest first. Dates are the tag date.
 - **Stale-index warning** — read commands warn when the index is older than `sync.stale_days` (7);
   bean never auto-syncs.
 - **Plugin system** — 12 core connectors, ~45 prototypes (`bean plugins enable`), and drop-in
-  plugins from `~/.bean/plugins/` plus the `bean-connector` authoring skill.
+  plugins from `~/.bean/plugins/` plus `docs/authoring-connectors.md` (the authoring guide).
 - **Release tooling** — `scripts/release.py`, `Makefile`, this document.
 
 ### 0.1.0
