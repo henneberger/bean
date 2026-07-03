@@ -1,9 +1,10 @@
 """Discord source. Auth is a bot token (`Authorization: Bot <token>`); the bot must be a member
 of the guilds/channels you track. Like Slack, the message stream is cut into per-channel per-ISO-week
 digest documents (`<channel_name>/<YYYY-Www>`) so units stay stable as history grows. Each channel
-is paginated backwards by message-id snowflake down to a lookback floor (default 14 days,
-snapped to the ISO-week start so digests re-render from complete weeks); `--full` reaches back
-`since_days`. Reuses slack's ISO-week math. Weekly digests never prune."""
+is paginated backwards by message-id snowflake down to a floor: the initial backfill (`lookback_days`,
+default 14) on the first sync, then the per-channel cursor after that (snapped to the ISO-week start
+so digests re-render from complete weeks); `--full` reaches back `since_days`. Reuses slack's
+ISO-week math. Weekly digests never prune."""
 
 from __future__ import annotations
 
@@ -125,7 +126,14 @@ def sync(store: Store, config: dict, *, settings: dict | None = None, fetch=None
     changed = []
     for cid, name in channels.items():
         cursor = store.get_state(f"discord.cursor.{cid}", 0)
-        floor = (now - since_days * DAY) if (full or not cursor) else min(cursor, now - lookback * DAY)
+        # Lookback is the initial backfill (first sync only); after that continue from the cursor.
+        # `--full` ignores the cursor and reaches back since_days. (Shares Slack's window semantics.)
+        if full:
+            floor = now - since_days * DAY
+        elif cursor:
+            floor = cursor
+        else:
+            floor = now - lookback * DAY
         floor = slack.week_start(floor)
         messages = _fetch_messages(cid, headers, fetch, floor, log)
         if not messages:

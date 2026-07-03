@@ -1,8 +1,9 @@
 """Slack source. The stream is cut into per-channel per-ISO-week digest documents (threads
-as their own sections) so units stay stable as history grows. A lookback window (default 14
-days) re-fetches recent history each sync, catching edits and deletions inside it; older
-edits are missed by design (`--full` re-fetches everything within since_days). Cursors live
-in the workspace state table."""
+as their own sections) so units stay stable as history grows. `lookback_days` (default 14) is
+the initial backfill: the first sync of a channel reaches back that far. After that each sync
+continues from the last message it saw (a per-channel cursor in the workspace state table),
+re-rendering the in-progress week so same-week edits land; edits to older weeks are missed by
+design (`--full` re-fetches everything within since_days)."""
 
 from __future__ import annotations
 
@@ -145,9 +146,16 @@ def sync(store: Store, config: dict, *, token: str, team_url: str | None = None,
             log(f"slack: #{name} not found (is the account a member?)")
             continue
         cursor = store.get_state(f"slack.cursor.{ch['id']}", 0)
-        # Fetch back to the lookback floor, snapped to the ISO week start so week digests
-        # always re-render from complete data. First/--full sync is bounded by since_days.
-        floor = (now - since_days * DAY) if (full or not cursor) else min(cursor, now - lookback * DAY)
+        # Lookback is the initial backfill only: the first sync reaches back `lookback` days. After
+        # that we continue from the last message we saw (cursor), snapped to its ISO-week start so
+        # the in-progress week always re-renders from complete data (catching same-week edits). A
+        # `--full` sync ignores the cursor and reaches back `since_days`.
+        if full:
+            floor = now - since_days * DAY
+        elif cursor:
+            floor = cursor
+        else:
+            floor = now - lookback * DAY
         oldest = f"{week_start(floor):.6f}"
 
         messages = [m for m in paged("conversations.history", "messages", channel=ch["id"], oldest=oldest)

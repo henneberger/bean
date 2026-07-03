@@ -279,6 +279,9 @@ HISTORY = [
 REPLIES = [{"ts": ts(1, ".000200"), "user": "U2", "text": "Confirmed", "thread_ts": ts(1)}]
 
 
+seen_oldest = {}
+
+
 def sfetch(url, headers):
     from urllib.parse import urlparse, parse_qs
     u = urlparse(url)
@@ -290,6 +293,7 @@ def sfetch(url, headers):
             {"id": "C2", "name": "random-not-joined", "is_member": False}]})
     if method == "conversations.history":
         oldest = float(q["oldest"][0])
+        seen_oldest["v"] = oldest
         return res(200, {"ok": True, "messages": [m for m in HISTORY if float(m["ts"]) >= oldest]})
     if method == "conversations.replies":
         return res(200, {"ok": True, "messages": [HISTORY[0]] + REPLIES})
@@ -312,9 +316,12 @@ with Store(sws) as store:
     s2 = slack.sync(store, scfg, token="xoxp-1", team_url="https://t.slack.com", fetch=sfetch, now=NOW)
     ok(s2["changed"] == [], "unchanged history is a no-op")
     ok(store.get_state("slack.cursor.C1") == float(ts(1)), "cursor advanced to latest ts")
+    # Lookback is not re-applied per sync: the second sync's floor is the cursor's week start, not
+    # a rolling now-minus-14-days window (which would reach back to W25).
+    ok(seen_oldest["v"] == slack.week_start(float(ts(1))), "later syncs floor at the cursor's week, not a rolling lookback")
     HISTORY[1]["text"] = "Deploy done (edited: rolled back)"
     s3 = slack.sync(store, scfg, token="xoxp-1", team_url="https://t.slack.com", fetch=sfetch, now=NOW)
-    ok(s3["changed"] == ["eng-payments/2026-W27"], "edit inside the lookback window rewrites the week")
+    ok(s3["changed"] == ["eng-payments/2026-W27"], "edit inside the current week rewrites the week")
     ok("rolled back" in store.get("slack", "eng-payments/2026-W27").body, "edited text landed")
 
 # all-channels mode: no explicit channel list → sync every channel the account is a member of

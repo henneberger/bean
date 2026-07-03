@@ -85,15 +85,15 @@ DEFAULTS: dict = {
         # can nudge the user to run `bean sync`. 0 = never warn.
         "stale_days": 7,
     },
-    # Lookback windows: how far back the FIRST sync of a chat/feed source reaches. After that each
-    # source tracks the last message/change it saw (a cursor) and only re-scans from there, floored
-    # to this window so recent edits/deletes are still caught. `bean sync --full` ignores the cursor
-    # and reaches back `--since` days. Set per source with `config set <source>.lookback_days N`.
+    # Lookback = the INITIAL backfill, chosen once at setup: how far back a source reaches on its
+    # first sync. After that each source tracks the last message/change it saw (a cursor) and pulls
+    # only what's new from there — lookback is not re-applied per sync. `bean sync --full` ignores
+    # the cursor and reaches back `--since` days. Set per source with `config set <source>.lookback_days N`.
     "slack": {
-        "lookback_days": 14,  # recent history re-fetched every sync to catch edits/deletes
+        "lookback_days": 14,  # first sync backfills this many days; later syncs continue from the cursor
     },
     "discord": {
-        "lookback_days": 14,  # same rolling window as Slack (shares the ISO-week digest math)
+        "lookback_days": 14,  # same initial backfill as Slack (shares the ISO-week digest math)
     },
     "gdocs": {
         # With no doc/folder explicitly added, bean auto-indexes the Google Docs + PDFs you own.

@@ -158,9 +158,13 @@ Changing an **index-shape** knob (embedding model, any `chunking.*`, enabling `r
 | `graph.enabled` | `true` | build the `related` edge index during sync |
 | `sync.stale_days` | `7` | warn (never auto-sync) when the index is older than this; 0 = off |
 | `ocr.backend` / `model` / `dpi` | `auto` / `baidu/Unlimited-OCR` / `200` | PDF text backend (below) |
-| `slack.lookback_days` | `14` | how far the first Slack sync reaches back; later syncs re-fetch this window to catch edits |
-| `discord.lookback_days` | `14` | same rolling window for Discord channel digests |
-| `gdocs.lookback_days` | `30` | how far the first Drive sync reaches; later syncs discover only files changed since (cursor). 0 = all |
+| `slack.lookback_days` | `14` | initial backfill: how far the **first** Slack sync reaches back; later syncs continue from the cursor |
+| `discord.lookback_days` | `14` | initial backfill for Discord channel digests (first sync only) |
+| `gdocs.lookback_days` | `30` | initial backfill for auto-indexed Drive files; later syncs discover only files changed since (cursor). 0 = all |
+
+`lookback_days` is a one-time choice: `/bean init` prompts for it per source and it bounds only the
+**first** sync's backfill. After that each source tracks a cursor and pulls just what's new, so you
+never re-scan a window on every sync. `sync --full` ignores the cursor to re-pull within `--since`.
 
 The embedding model downloads automatically the first time you actually sync or search — not at
 setup — and is cached afterward.
@@ -198,6 +202,7 @@ none.
 
 - Google's Markdown export drops images, drawings, and smart chips; docs that refuse Markdown fall
   back to plain text.
-- Slack edits older than the lookback window (14 days) are missed by design; `sync --full`
+- After the first sync, Slack/Discord continue from a per-channel cursor and re-render the current
+  week, so edits to that week land but edits to older weeks are missed by design; `sync --full`
   re-fetches everything within `--since` days (default 90).
 - GitHub syncs issues/PRs incrementally by `updated_at`; a removed repo prunes everything under it.

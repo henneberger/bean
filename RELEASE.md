@@ -67,11 +67,12 @@ make clean                                     # remove dist/ build/ *.egg-info 
 Newest first. Dates are the tag date.
 
 ### Unreleased
-- **Smart lookback windows** — lookback is now a per-connector setting for every source that has a
-  window (`slack`/`discord`/`gdocs`.`lookback_days`), resolved connector-first then from settings.
-  Google Drive gained a cursor (like Slack/Discord already had): the first sync reaches back
-  `lookback_days`, later syncs discover only files changed since the last one. `init --json` now
-  carries a `lookback` block per windowed source so setup can prompt for the initial reach-back.
+- **Smart lookback windows** — `lookback_days` is now the one-time *initial backfill*, chosen at
+  setup, not a per-sync window. Every windowed source (`slack`/`discord`/`gdocs`) reaches back
+  `lookback_days` on its first sync, then tracks a cursor and pulls only what's new; `--full` still
+  reaches back `--since`. Slack/Discord no longer re-fetch a rolling 14-day window each sync, and
+  Google Drive gained the same cursor. Lookback is a per-connector setting (resolved connector-first
+  then from settings), and `init --json` carries a `lookback` block per source so setup prompts for it.
 - **README** — install command up top (`/plugin marketplace add` + `/plugin install`); dropped the
   Development section; Notion no longer listed in the connector table.
 - **Google Drive PDFs** — the Drive connector now indexes native PDFs (owned files + tracked
