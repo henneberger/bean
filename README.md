@@ -12,14 +12,14 @@ credentials, embeds on your machine, and stores everything locally.
 In Claude Code, add this repo as a plugin marketplace, then install the plugin. Run the two
 commands one at a time (the marketplace add takes a full clone URL, not an `owner/repo` shorthand):
 
-```
+```bash
 /plugin marketplace add https://github.com/henneberger/bean.git
 /plugin install bean@bean
 ```
 
 ## Use it from Claude Code
 
-```
+```bash
 /bean init                     # connect sources — a guided conversation
 /bean sync                     # fetch changes and re-embed only what changed
 /bean how do refunds work?     # ask; answers cite doc titles and URLs
@@ -85,7 +85,7 @@ connectors (a GitHub project, this repo's files) live in the per-repo workspace.
 so from any repo you see that repo's local sources plus everything global. Credentials are always
 shared per-user; scope only governs where the *tracked items + index* live.
 
-```
+```bash
 bean scope                       # show each connector's scope
 bean scope github local          # this repo only
 bean scope slack global          # all repos
@@ -107,7 +107,7 @@ Every query runs two rankings and fuses them with **weighted** reciprocal rank f
 
 Fusion is tunable. Pass extra `--variant` queries (a paraphrase plus the identifiers you spotted)
 and they all fuse. `auto_weight` leans keyword for identifier queries and vector for questions.
-`recency_decay` biases toward recently-changed docs. Adjacent chunks **merge into sections**. An
+`recency_decay` biases toward recently changed docs. Adjacent chunks **merge into sections**. An
 optional local cross-encoder **reranker** (`search.rerank.enabled`, fastembed, no API) polishes the
 top results. Filter by `--author` / `--since` / `--before`, or widen from a doc to its graph
 neighbourhood with `bean related <ref>` (same repo/project/channel/author). Turn fusion off
@@ -119,7 +119,7 @@ Settings resolve in three layers, later wins: built-in defaults ← global `~/.b
 a repo's own `settings` block. Nothing is an environment variable; secrets never live here (tokens
 stay in `~/.bean/credentials/`, mode 0600).
 
-```
+```bash
 /bean config list                              # the full resolved config
 /bean config get search.recency_decay          # one value
 /bean config set embedding.backend fastembed     # switch to the higher-accuracy ONNX embedder
@@ -173,11 +173,11 @@ a static CPU embedder that runs ~100× faster than the old fastembed default. Ke
 refusable results absorb the small accuracy gap. Switch
 `embedding.backend` to `fastembed` for an ONNX transformer (e.g. `BAAI/bge-small-en-v1.5`), or point
 `embedding.plugin` at a `.py` exposing `embed(texts)` to bring any library or API. The model
-downloads automatically the first time you sync or search (not at setup) and is cached afterward.
+downloads automatically the first time you sync or search (not at setup), and bean caches it after.
 
 ## PDF parsing
 
-bean reads PDFs in local folders and native PDFs in Google Drive. Both go through the same
+bean reads PDFs in local folders and PDF files stored in Google Drive. Both go through the same
 extractor and honor the `ocr.backend` setting below. Born-digital PDFs use embedded text (pymupdf, a
 base dependency). For scans, handwriting, or complex layouts, set `ocr.backend` to `unlimited-ocr` and
 bean runs pages through [baidu/Unlimited-OCR](https://github.com/baidu/Unlimited-OCR), a
@@ -199,7 +199,7 @@ a 2024 laptop (Apple M3 Pro, no GPU), with the default `model2vec` embedder:
 | **Scanned PDFs** (`ocr.backend = unlimited-ocr`, opt-in) | **~40 sec/page** (~1.5 pages/min) | 700 scanned pages ≈ **8 hours** |
 
 **Scanned PDFs are the slow path.** With OCR on, plan on ~40 seconds per page and **leave the laptop
-running overnight** — a few hundred pages is an evening, a few thousand a couple of nights. Sync is
+running overnight**. A few hundred pages is an evening. A few thousand is a couple of nights. Sync is
 resumable, so an interrupted run picks up where it left off. (One-time downloads on first use,
 excluded above: the embedding model ~30 MB, and the OCR model ~6 GB the first time you enable it.)
 

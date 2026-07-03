@@ -1,0 +1,20 @@
+{
+  "detector": {
+    "ignoreValues": {
+      "microsoft-avoid-words": [
+        "backend"
+      ],
+      "indefinite-article": [
+        "one-time"
+      ],
+      "repeated-word": [
+        "bean"
+      ]
+    },
+    "ignoreRules": [
+      "microsoft-general-url",
+      "ms-first-person",
+      "microsoft-heading-acronyms"
+    ]
+  }
+}
