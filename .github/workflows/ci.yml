@@ -1,7 +1,7 @@
 name: CI
 
 # Build + offline test gate. Reuses the same tooling as a real release
-# (scripts/release.py check → build) so CI and `make release` stay in lockstep.
+# (dev/release.py check → build) so CI and `make release` stay in lockstep.
 on:
   push:
     branches: [main]
@@ -31,7 +31,7 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -e '.[dev]'
       - name: Check (version sync + byte-compile + offline tests)
-        run: python scripts/release.py check
+        run: python dev/release.py check
 
   build:
     name: build wheel + sdist
@@ -49,7 +49,7 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install build
       - name: Build wheel + sdist
-        run: python scripts/release.py build
+        run: python dev/release.py build
       - name: Upload dist artifacts
         uses: actions/upload-artifact@v4
         with:

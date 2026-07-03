@@ -7,7 +7,7 @@ bean ships two things from one repo, versioned together:
   — distributed as the repo itself; the marketplace entry points at `./`.
 
 A release = a single version bumped across both manifests, a green offline test suite, built
-artifacts, and a git tag `vX.Y.Z`. It is driven by `scripts/release.py` (pure stdlib) or `make`.
+artifacts, and a git tag `vX.Y.Z`. It is driven by `dev/release.py` (pure stdlib) or `make`.
 
 ## Versioning
 
@@ -33,8 +33,8 @@ sdist into `dist/`) → one commit → one tag. It refuses to run on a dirty tre
 Equivalent without make:
 
 ```
-python3 scripts/release.py check
-python3 scripts/release.py cut 0.2.0 --yes
+python3 dev/release.py check
+python3 dev/release.py cut 0.2.0 --yes
 ```
 
 ### After tagging
@@ -48,10 +48,10 @@ python3 scripts/release.py cut 0.2.0 --yes
 ## Individual commands
 
 ```
-python3 scripts/release.py version            # print current version
-python3 scripts/release.py version 0.2.0       # set it in pyproject + plugin.json only
-python3 scripts/release.py check               # version-sync + tests + compile
-python3 scripts/release.py build               # wheel + sdist into dist/
+python3 dev/release.py version            # print current version
+python3 dev/release.py version 0.2.0       # set it in pyproject + plugin.json only
+python3 dev/release.py check               # version-sync + tests + compile
+python3 dev/release.py build               # wheel + sdist into dist/
 make clean                                     # remove dist/ build/ *.egg-info + caches
 ```
 
@@ -86,7 +86,7 @@ Newest first. Dates are the tag date.
   `Response` so binary downloads survive the injectable fetch seam.
 - **CI/release workflows** — `.github/workflows/ci.yml` (build + offline tests on push/PR across
   Python 3.10–3.12) and `release.yml` (rebuilds artifacts and publishes a GitHub Release on a
-  `vX.Y.Z` tag). Both reuse `scripts/release.py check`/`build`.
+  `vX.Y.Z` tag). Both reuse `dev/release.py check`/`build`.
 - **GitHub connector: issues + PRs only** — dropped repo Markdown indexing; the connector now tracks
   issues and pull requests (body + comments). Narrowing `include` prunes previously-indexed docs on
   the next sync.
@@ -102,7 +102,7 @@ Newest first. Dates are the tag date.
   bean never auto-syncs.
 - **Plugin system** — 12 core connectors plus drop-in plugins from `~/.bean/plugins/`, with
   `docs/authoring-connectors.md` (the authoring guide).
-- **Release tooling** — `scripts/release.py`, `Makefile`, this document.
+- **Release tooling** — `dev/release.py`, `Makefile`, this document.
 
 ### 0.1.0
 - Initial: Slack, Google Docs/Drive, Notion, GitHub, local files (Markdown/office/PDF+OCR); hybrid

@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from . import config as cfgmod
 from .chunks import Chunk, chunk_text
-from .index import delete_doc, reindex_doc
+from .index import delete_doc, ensure_indexes, reindex_doc
 from .sources import SOURCES
 from .store import Store
 from .workspace import Workspace
@@ -107,6 +107,8 @@ def run_sync(ws: Workspace, *, only: str | None = None, keys: set | None = None,
             log(f"indexed {source}/{doc_id}")
         for source, doc_id in removed:
             delete_doc(ws, source, doc_id)
+        if embed_targets or removed:
+            ensure_indexes(ws, log=log)  # keep scalar/vector indexes current after any index change
 
         # Lightweight relationship graph: derive edges (authored_by / in-container) for the docs we
         # (re)embedded — changed docs on a plain sync, every doc on a --rebuild.

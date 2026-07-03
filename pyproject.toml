@@ -1,7 +1,7 @@
 [project]
 name = "bean"
 # Single source of truth for the version. `.claude-plugin/plugin.json` mirrors it; keep them in
-# lockstep with `python3 scripts/release.py version X.Y.Z` (see RELEASE.md).
+# lockstep with `python3 dev/release.py version X.Y.Z` (see RELEASE.md).
 version = "0.1.0"
 description = "Local hybrid search over your work knowledge, as a Claude Code plugin. No server: your credentials, your machine, Lance + DuckDB under ~/.bean."
 readme = "README.md"
@@ -9,11 +9,10 @@ requires-python = ">=3.10"
 license = { text = "Apache-2.0" }
 dependencies = [
     "duckdb>=1.0",
-    "lancedb>=0.15",
-    "pylance>=0.9",    # the Lance engine under lancedb — lets DuckDB query the chunk dataset directly
+    "lancedb>=0.15",   # vector store; bundles `lance` (pylance) — `table.to_lance()` feeds DuckDB
     "requests>=2.31",
-    "fastembed>=0.3",
-    "pymupdf>=1.24",   # born-digital PDF text extraction (OCR is the optional extra below)
+    "fastembed>=0.3",  # default embedder (ONNX/CPU); a custom embedder can be dropped in as a plugin
+    "pymupdf>=1.24",   # PDF: born-digital text + page rasterisation for the OCR backend
 ]
 
 [project.optional-dependencies]
@@ -21,7 +20,7 @@ dependencies = [
 # bean provisions it into its venv the first time ocr.backend = "unlimited-ocr" actually runs
 # (see bean/pdf.py:_provision_ocr). This extra just lets you pre-install it if you'd rather.
 ocr = ["transformers>=4.44", "torch>=2.1", "pillow>=10.0"]
-# Release tooling (building the wheel/sdist). `make build` / `scripts/release.py build` use it.
+# Release tooling (building the wheel/sdist). `make build` / `dev/release.py build` use it.
 dev = ["build>=1.0"]
 
 [project.scripts]

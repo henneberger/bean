@@ -34,18 +34,18 @@ jobs:
         if: github.event_name == 'push'
         run: |
           tag="${GITHUB_REF_NAME#v}"
-          ver="$(python scripts/release.py version)"
+          ver="$(python dev/release.py version)"
           echo "tag=$tag  pyproject=$ver"
           if [ "$tag" != "$ver" ]; then
-            echo "::error::tag v$tag does not match project version $ver — run scripts/release.py version $tag"
+            echo "::error::tag v$tag does not match project version $ver — run dev/release.py version $tag"
             exit 1
           fi
 
       - name: Check (version sync + byte-compile + offline tests)
-        run: python scripts/release.py check
+        run: python dev/release.py check
 
       - name: Build wheel + sdist
-        run: python scripts/release.py build
+        run: python dev/release.py build
 
       - name: Upload dist artifacts
         uses: actions/upload-artifact@v4

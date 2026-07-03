@@ -1,7 +1,7 @@
 {
   "name": "bean",
   "version": "0.1.0",
-  "description": "Local hybrid search over your knowledge base — 12 core connectors (Slack, Google Drive, Notion, GitHub, Confluence, Jira, Zendesk, Salesforce, HubSpot, Microsoft 365, Discord, local files incl. PDF), ~45 more as enable-on-demand prototypes, and a plugin system for authoring your own. /bean <question>, /bean sync, /bean init. No server: your credentials, Lance + DuckDB under ~/.bean.",
+  "description": "Local hybrid search over your knowledge base — 10 built-in connectors (Slack, Google Drive, GitHub, Confluence, Jira, Zendesk, Salesforce, HubSpot, Microsoft 365, Discord) plus local files (incl. PDF), and a plugin system for authoring your own. /bean <question>, /bean sync, /bean init. No server: your credentials, Lance + DuckDB under ~/.bean.",
   "author": {
     "name": "Daniel Henneberger"
   }

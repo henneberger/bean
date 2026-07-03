@@ -5,11 +5,11 @@ bean ships two things from one repo: the `bean` Python package (pyproject/hatchl
 Code plugin (`.claude-plugin/plugin.json` + `skills/` + `scripts/bean.py`). A release keeps their
 versions in lockstep, proves the offline test suite is green, builds the wheel/sdist, and tags git.
 
-  python3 scripts/release.py version              # print the current version
-  python3 scripts/release.py version X.Y.Z        # set version in pyproject.toml + plugin.json
-  python3 scripts/release.py check                # version-sync + offline tests + byte-compile
-  python3 scripts/release.py build                # python -m build  ->  dist/*.whl, *.tar.gz
-  python3 scripts/release.py cut X.Y.Z [--yes]    # version -> check -> build -> commit + tag vX.Y.Z
+  python3 dev/release.py version              # print the current version
+  python3 dev/release.py version X.Y.Z        # set version in pyproject.toml + plugin.json
+  python3 dev/release.py check                # version-sync + offline tests + byte-compile
+  python3 dev/release.py build                # python -m build  ->  dist/*.whl, *.tar.gz
+  python3 dev/release.py cut X.Y.Z [--yes]    # version -> check -> build -> commit + tag vX.Y.Z
 
 `cut` is a dry run unless you pass --yes. Run it from a clean tree; it makes exactly one commit
 ("release: vX.Y.Z") and one tag ("vX.Y.Z"). See RELEASE.md for the full procedure.

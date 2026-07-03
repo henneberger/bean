@@ -20,20 +20,20 @@ test:
 	$(PY) tests/test_bean.py
 
 check:
-	$(PY) scripts/release.py check
+	$(PY) dev/release.py check
 
 build:
 	$(PY) -m pip install --quiet build >/dev/null 2>&1 || true
-	$(PY) scripts/release.py build
+	$(PY) dev/release.py build
 
 version:
-	$(PY) scripts/release.py version
+	$(PY) dev/release.py version
 
 # make release VERSION=0.2.0        # dry run — prints the plan
 # make release VERSION=0.2.0 YES=1  # actually commit + tag
 release:
 	@test -n "$(VERSION)" || (echo "usage: make release VERSION=x.y.z [YES=1]" && exit 2)
-	$(PY) scripts/release.py cut $(VERSION) $(if $(YES),--yes,)
+	$(PY) dev/release.py cut $(VERSION) $(if $(YES),--yes,)
 
 clean:
 	rm -rf dist build *.egg-info bean/__pycache__ bean/prototypes/__pycache__
