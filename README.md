@@ -22,6 +22,7 @@ In Claude Code, add this repo as a plugin marketplace and install it:
 /bean sync                     # fetch changes and re-embed only what changed
 /bean how do refunds work?     # ask; answers cite doc titles and URLs
 /bean status                   # what's connected, indexed, and which embedding model
+/bean sql "SELECT …"           # read-only SQL over the store (no query = print the schema)
 ```
 
 `/bean` is not one search. Claude picks from a toolbox — hybrid `search`, `recent`, whole-`thread`
@@ -48,12 +49,12 @@ Under the hood these map to `search` (with `--variant`, `--author`, `--since`, `
 
 ## Connectors
 
-bean ships **11 core connectors**, always on:
+bean ships **10 core connectors**, always on:
 
 | Source | Auth | What it indexes |
 |--------|------|-----------------|
 | **Slack** | user token (`xoxp-…`) | channels, cut into per-week digests with threads as sections |
-| **Google Drive** | gcloud sign-in | Docs as Markdown and PDFs (extracted); whole Drive folders |
+| **Google Drive** | gcloud sign-in | Docs, PDFs (extracted), and comments (each comment its own author-attributed entry); whole Drive folders |
 | **GitHub** | personal access token | issues and pull requests (body + comments) |
 | **Confluence** | Cloud (email + API token) or Server/DC (PAT) | space pages (storage HTML → text) |
 | **Jira** | Cloud (email + API token) or Server/DC (PAT) | project issues + comments |
@@ -62,7 +63,7 @@ bean ships **11 core connectors**, always on:
 | **HubSpot** | private-app token | tickets, notes, and knowledge-base articles |
 | **Microsoft 365** | device-code or `az` CLI | OneDrive/SharePoint files, Outlook threads, Teams week-digests |
 | **Discord** | bot token | channels, cut into per-week digests like Slack |
-| **Local files** | none | a folder (crawled recursively) or file — Markdown/text, office docs (**Word**, OpenDocument, RTF), and **PDF** |
+| **Local files** | none | a folder (crawled recursively) or file — Markdown/text, office docs (**Word**, OpenDocument, RTF, **PowerPoint**, **Excel**), **HTML**, and **PDF** |
 
 Where a service offers more than one way in, bean supports both and prefers the path an individual
 can set up without an admin (Atlassian Cloud tokens or Server PATs; Microsoft device-code or `az`).
@@ -71,8 +72,8 @@ can set up without an admin (Atlassian Cloud tokens or Server PATs; Microsoft de
 
 **Need a source bean doesn't have?** Author a connector — a single offline-testable module dropped
 into `~/.bean/plugins/`, live with no core edits. [`docs/authoring-connectors.md`](docs/authoring-connectors.md)
-walks Claude through the contract, helpers, a test recipe, and a template; the 12 core connectors in
-[`bean/`](bean/) are worked examples across every API shape. `bean plugins list` shows what's loaded.
+walks Claude through the contract, helpers, a test recipe, and a template; the 10 core connectors in
+[`bean/connectors/`](bean/connectors/) are worked examples across every API shape. `bean plugins list` shows what's loaded.
 
 ### Global vs local scope
 
@@ -119,7 +120,7 @@ stay in `~/.bean/credentials/`, mode 0600).
 ```
 /bean config list                              # the full resolved config
 /bean config get search.recency_decay          # one value
-/bean config set embedding.model BAAI/bge-base-en-v1.5
+/bean config set embedding.backend fastembed     # switch to the higher-accuracy ONNX embedder
 /bean config set search.rerank.enabled true
 /bean sync --rebuild                            # re-fetch + re-embed to apply a model/chunk change
 ```
@@ -131,7 +132,9 @@ configured.
 
 | Path | Default | What it does |
 |------|---------|--------------|
-| `embedding.model` | `BAAI/bge-small-en-v1.5` | any fastembed model (⟳ sync --rebuild) |
+| `embedding.backend` | `model2vec` | `model2vec` (fast static/CPU embedder) or `fastembed` (ONNX transformer, higher accuracy) (⟳ sync --rebuild) |
+| `embedding.model` | `minishlab/potion-retrieval-32M` | model for the backend; for fastembed use e.g. `BAAI/bge-small-en-v1.5` (⟳ sync --rebuild) |
+| `embedding.plugin` | `null` | path/import path to a `.py` exposing `embed(texts)` (and optional `embed_query`); overrides backend/model — any library/API that returns vectors (⟳ sync --rebuild) |
 | `embedding.batch_size` | `64` | embed batch size |
 | `chunking.lines` / `overlap` | `40` / `8` | window height and shared lines (⟳) |
 | `chunking.max_chars` / `min_chars` | `2000` / `40` | per-chunk cap; drop windows shorter than this (⟳) |
@@ -154,7 +157,7 @@ configured.
 | `gdocs.lookback_days` | `30` | initial backfill for auto-indexed Drive files; later syncs discover only files changed since (cursor). 0 = all |
 
 **Per-source chunking.** Any `chunking.*` leaf can be overridden per source as `<source>.chunking.*`
-(e.g. `bean config set slack.chunking.lines 15` or `notion.chunking.max_chars 1500`). A source's
+(e.g. `bean config set slack.chunking.lines 15` or `gdocs.chunking.max_chars 1500`). A source's
 effective chunking is the global `chunking` block with its own `chunking` sub-block merged on top.
 Slack ships smaller defaults (`slack.chunking` = lines 15, overlap 3, max_chars 1000, min_chars 20)
 since chat is short.
@@ -163,8 +166,13 @@ since chat is short.
 **first** sync's backfill. After that each source tracks a cursor and pulls just what's new, so you
 never re-scan a window on every sync. `sync --rebuild` ignores the cursor to re-pull within `--since`.
 
-The embedding model downloads automatically the first time you actually sync or search — not at
-setup — and is cached afterward.
+**The embedder is pluggable.** The default `model2vec` backend (`minishlab/potion-retrieval-32M`) is
+a static CPU embedder that runs ~100× faster than the old fastembed default; keyword fusion and
+refusable results absorb the small accuracy gap, so bean is speed-first out of the box. Switch
+`embedding.backend` to `fastembed` for an ONNX transformer (e.g. `BAAI/bge-small-en-v1.5`), or point
+`embedding.plugin` at a `.py` exposing `embed(texts)` to bring any library or API. The model
+downloads automatically the first time you actually sync or search — not at setup — and is cached
+afterward.
 
 ## PDF parsing
 
@@ -176,13 +184,16 @@ vision-language OCR model. You install nothing: bean provisions the OCR toolchai
 transformers) into its own venv the first time OCR runs, the same way the embedding model
 downloads itself on first use, and runs on CUDA, Apple MPS, or CPU, whichever the machine has.
 The default `auto` backend takes embedded text where it exists and OCRs only the pages that have
-none.
+none. OCR stays opt-in because it's slow: Unlimited-OCR is high quality but ~40s/page on CPU, far
+too slow to run by default, so born-digital text (pymupdf) is the fast default path.
 
 ## How it works
 
 - **Sources.** Each connector has a cheap change signal — a revision id, an `updated_at`, a git
   blob sha, or a file mtime — with the content hash as the final authority. `sync` re-embeds only
-  what actually changed; deletions revoke their vectors.
+  what actually changed; deletions revoke their vectors. Sync is resumable — the embed phase
+  checkpoints per document (oldest first), so an interrupted run picks up where it left off without
+  re-embedding what's done or skipping anything.
 - **Storage.** One DuckDB catalog per workspace holds document snapshots, revision history, sync
   cursors, and the relationship edges; a Lance table alongside it holds the chunks (text + vectors)
   as the single copy. There is no chunk mirror — keyword search, neighbours, and section-merge run
@@ -191,7 +202,10 @@ none.
   (global connectors share `~/.bean/_global/`). Credentials follow scope: a **global** connector's
   is shared at `~/.bean/credentials/`; a **local** connector's lives in that repo's workspace (so a
   different GitHub token per project just works), with the shared dir as a fallback. All mode 0600,
-  never inside a repo.
+  never inside a repo. `bean sql "SELECT …"` runs read-only queries (SELECT/WITH) straight over this
+  store — tables `documents`, `edges`, `state`, and the Lance `_chunks` dataset — for structured
+  questions like counts by author; `bean sql` with no query prints the schema, `--global` targets
+  the shared store.
 - **Auth.** Google rides on gcloud's own pre-verified OAuth client, so nobody sets up a GCP
   project. Slack and GitHub take a token you paste once.
 

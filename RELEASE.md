@@ -67,6 +67,15 @@ make clean                                     # remove dist/ build/ *.egg-info 
 Newest first. Dates are the tag date.
 
 ### Unreleased
+- **Connectors + retrieval batch** — the 11 built-in connectors moved to `bean/connectors/` and
+  Notion was removed (**10 core** now); Google Drive indexes each comment as its own
+  author-attributed, timestamped document (`gdocs.comments`); the embedder is pluggable under
+  `embedding` (default fast `model2vec`/`minishlab/potion-retrieval-32M`, plus `fastembed` and a
+  `plugin` escape hatch); new `bean sql` runs read-only SELECT/WITH over the DuckDB store (no query
+  prints the schema, `--global` for the shared store); sync checkpoints the embed phase per-document
+  so an interrupted run resumes cleanly; local files gained `.pptx`/`.xlsx`/`.html`; each connector
+  ships a guided `skills/connect-<name>/` setup skill; Lance scalar + vector indexes; `release.py`
+  moved to `dev/`.
 - **CLI simplification + per-source chunking** — removed `bean add`/`remove`/`reembed`; `sync --full`
   is now `sync --rebuild` (re-fetches AND re-embeds every doc, absorbing reembed); all `--json` output
   and the `--no-hybrid` flag removed (commands are human-readable; `bean init` prints setup detail as
@@ -100,7 +109,7 @@ Newest first. Dates are the tag date.
   metadata-derived graph (`bean related`, `--author/--since/--before`).
 - **Stale-index warning** — read commands warn when the index is older than `sync.stale_days` (7);
   bean never auto-syncs.
-- **Plugin system** — 12 core connectors plus drop-in plugins from `~/.bean/plugins/`, with
+- **Plugin system** — core connectors plus drop-in plugins from `~/.bean/plugins/`, with
   `docs/authoring-connectors.md` (the authoring guide).
 - **Release tooling** — `dev/release.py`, `Makefile`, this document.
 

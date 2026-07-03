@@ -5,20 +5,20 @@
 > slash command.
 
 A connector is **one Python module** exposing four callables and a `SOURCE`. Drop it in
-`~/.bean/plugins/` and it's live — no core edits. bean ships 12 core connectors in `bean/` as worked
-examples you can read or copy. Your job: write the module, test it offline, install it.
+`~/.bean/plugins/` and it's live — no core edits. bean ships 10 core connectors in `bean/connectors/`
+as worked examples you can read or copy. Your job: write the module, test it offline, install it.
 
 **Before writing, read 1–2 core connectors whose shape matches:**
 
 | Source shape | Read | Notes |
 |---|---|---|
-| REST list + item + comments | `bean/jira.py`, `bean/zendesk.py` | issues/tickets → one doc each |
-| Wiki / KB (HTML bodies) | `bean/confluence.py`, `bean/hubspot.py` | `html_to_text` the body |
-| Whole-collection (index everything) | `bean/salesforce.py`, `bean/hubspot.py` | `always_when_connected`, never prune |
-| Chat (per-week digests) | `bean/discord.py`, `bean/slack.py` | reuse `bean.slack.iso_week` / `week_start` |
-| Files (office/pdf) | `bean/gdocs.py`, `bean/localfiles.py` | temp-file → `extract_office`/`extract_pdf` |
-| CLI/OAuth-minted token | `bean/microsoft.py`, `bean/gdocs.py` | injectable `token_fn=` for offline tests |
-| No-auth fetch | `bean/localfiles.py` | `auth=None`, no `connect` |
+| REST list + item + comments | `bean/connectors/jira.py`, `bean/connectors/zendesk.py` | issues/tickets → one doc each |
+| Wiki / KB (HTML bodies) | `bean/connectors/confluence.py`, `bean/connectors/hubspot.py` | `html_to_text` the body |
+| Whole-collection (index everything) | `bean/connectors/salesforce.py`, `bean/connectors/hubspot.py` | `always_when_connected`, never prune |
+| Chat (per-week digests) | `bean/connectors/discord.py`, `bean/connectors/slack.py` | reuse `bean.connectors.slack.iso_week` / `week_start` |
+| Files (office/pdf) | `bean/connectors/gdocs.py`, `bean/connectors/localfiles.py` | temp-file → `extract_office`/`extract_pdf` |
+| CLI/OAuth-minted token | `bean/connectors/microsoft.py`, `bean/connectors/gdocs.py` | injectable `token_fn=` for offline tests |
+| No-auth fetch | `bean/connectors/localfiles.py` | `auth=None`, no `connect` |
 
 ## The contract
 
@@ -60,7 +60,7 @@ from bean.workspace import load_credential, save_credential
 from bean.html import html_to_text, extract_readable      # HTML bodies / full web pages
 from bean.office import extract_office, OFFICE_EXT         # .docx/.odt/.rtf (needs a Path)
 from bean.pdf import extract_pdf                           # PDF (needs a path)
-from bean import slack                                     # slack.iso_week / week_start for chat
+from bean.connectors import slack                          # slack.iso_week / week_start for chat
 from bean.sources import Source
 ```
 
@@ -70,7 +70,7 @@ from bean.sources import Source
 ## Write it — start from the template
 
 Copy [`docs/connector-template.py`](connector-template.py) to `~/.bean/plugins/<name>.py` and fill it in. Or copy a
-matching core connector from `bean/`. Keep it self-contained.
+matching core connector from `bean/connectors/`. Keep it self-contained.
 
 ## Test it offline (do this before installing)
 
@@ -108,8 +108,8 @@ and POST connectors.
 3. Set it up (`bean auth <name> …` or write the cred file — see the main bean skill), then write
    the ref into the source's config lists, `bean sync`, `bean search`.
 
-Promote a plugin to core by moving its module into `bean/` and adding a row to `CORE_SOURCES` in
-`bean/sources.py`.
+Promote a plugin to core by moving its module into `bean/connectors/` and adding a row to
+`CORE_SOURCES` in `bean/sources.py`.
 
 ## Common mistakes
 

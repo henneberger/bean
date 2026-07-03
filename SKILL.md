@@ -1,6 +1,6 @@
 ---
 name: bean
-description: Search the user's connected knowledge base — Slack, Google Docs, Notion, GitHub, and local files (including PDFs) — with local hybrid (semantic + keyword) retrieval. Use when the user asks a question that their work docs/messages would answer, wants to connect or sync a source, or types /bean. Also for "what's in my docs about X", "what did we decide in #channel", or reconstructing context across their tools.
+description: Search the user's connected knowledge base — Slack, Google Docs, GitHub, and local files (including PDFs) — with local hybrid (semantic + keyword) retrieval. Use when the user asks a question that their work docs/messages would answer, wants to connect or sync a source, or types /bean. Also for "what's in my docs about X", "what did we decide in #channel", or reconstructing context across their tools.
 version: 0.1.0
 user-invocable: true
 argument-hint: init | sync | status | plugins | config | <question>
@@ -9,7 +9,7 @@ allowed-tools: Bash
 
 # bean — local knowledge retrieval
 
-You are driving **bean**, a local hybrid search index over the user's Slack, Google Docs, Notion,
+You are driving **bean**, a local hybrid search index over the user's Slack, Google Docs,
 GitHub, and local files. It runs entirely on this machine (their credentials, DuckDB + Lance under
 `~/.bean/<repo>-<hash>/`). **You** run every bean command yourself via Bash — as:
 
@@ -32,7 +32,7 @@ treat their message as the question). Empty or a plain question → the retrieva
 
 bean gives you a **toolbox of retrieval commands**. Don't just run one search — decide what
 context the question needs, then compose calls. Every command prints human-readable text — read its
-output. All accept `--source {slack|gdocs|notion|github|localfiles}` to scope by connector.
+output. All accept `--source {slack|gdocs|github|localfiles}` to scope by connector.
 
 - **`search "<q>"`** — hybrid semantic + keyword (the default), fused with weighted RRF. Keyword
   fusion means exact tokens (identifiers, error strings, ticket numbers, `#channels`) are found even
@@ -44,13 +44,22 @@ output. All accept `--source {slack|gdocs|notion|github|localfiles}` to scope by
   - `--author <substr>` `--since YYYY-MM-DD` `--before YYYY-MM-DD` — narrow by who/when.
   - `--doc <substr>` (id/title contains), `--expand N` (neighbouring chunks per hit), `--k N`.
 - **`recent [--source S] [--doc <substr>] [--author <substr>] [--since …] [--before …]`** — most
-  recently changed docs/messages. For "lately", "this week", "what did Ada change".
+  recently changed docs/messages. For "lately", "this week", "what did Ada change". `--doc` matches
+  the substring against title *and* id, so `recent --author eric --doc "<doc title>"` answers "show
+  me eric's most recent comment on my doc" (Google Drive indexes each comment as its own
+  author-attributed, timestamped entry).
 - **`related <ref>`** — documents one hop away in the graph: same repo/project/channel or same
   author, and directly linked docs. Each hit says *why* (`reason`). Use to widen from one doc to its
   neighbourhood ("what else touches this ticket's project?").
 - **`thread <ref>` / `doc <ref>`** — a whole Slack thread / week digest / document as one block,
   matched by id or title substring. Use when a snippet isn't enough.
 - **`neighbors <chunk-id>`** — the chunks surrounding a specific hit (each hit has an `id`).
+- **`sql "<SELECT …>"`** — drop to **read-only SQL** (SELECT/WITH only) over the workspace's DuckDB:
+  tables `documents`, `edges`, `state`, and the Lance `_chunks` dataset. Use it for structured
+  questions retrieval can't phrase — counts by author, comments by a person, dates. `bean.py sql`
+  with **no query prints the schema**. `--global` targets the shared cross-repo store. E.g. eric's
+  recent comments → `bean.py sql "SELECT title, modified_at FROM documents WHERE doc_id LIKE
+  '%#comment:%' AND author ILIKE '%eric%' ORDER BY modified_at DESC LIMIT 5"`.
 
 Ranking is config-driven (`config set search.*`): `recency_decay` (time-bias toward newer docs),
 `merge_sections` (coalesce adjacent chunks; on by default), `auto_weight` (identifier queries lean
@@ -62,7 +71,7 @@ a `bean sync --rebuild`.
 
 1. Pull the conversation: `bean.py recent --source slack --doc product`
 2. Read it; extract the concrete topics/decisions/identifiers.
-3. Find affected docs: `bean.py search "<topics>" --source gdocs --source notion --expand 1`
+3. Find affected docs: `bean.py search "<topics>" --source gdocs --expand 1`
 4. If a hit looks central, pull the whole thing (`doc <title>`), then answer, **citing each source
    by title and URL**. If nothing relevant comes back, say so rather than inventing; if the index is
    empty, point the user at `/bean init`.
@@ -73,9 +82,13 @@ Setup is a conversation; the CLI never prompts. Run `bean.py init` for a detaile
 one entry per source with its connection status, scope, credential file path + fields, config file
 path + the config list names that hold tracked refs (e.g. `slack.[channels]`, `github.[repos]`),
 whether it indexes-everything-when-connected, and (for Slack/Discord/Google Drive) the first-sync
-lookback. bean ships **12 core connectors** — Slack, Google Drive, Notion, GitHub, Confluence,
-Jira, Zendesk, Salesforce, HubSpot, Microsoft 365, Discord, and local files — always on. Read
+lookback. bean ships **10 core connectors** — Slack, Google Drive, GitHub, Confluence,
+Jira, Zendesk, Salesforce, HubSpot, Microsoft 365, Discord — plus local files, always on. Read
 `bean.py init`'s output and act on it; don't memorize the list.
+
+**Each connector has a guided `/connect-<name>` setup skill** (`connect-slack`, `connect-github`,
+…) that walks scope (global/local) and every auth option for that source. When setting a source up,
+invoke the matching one rather than improvising the steps.
 
 **Need a source that isn't core?** Author a connector — read
 `${CLAUDE_PLUGIN_ROOT}/docs/authoring-connectors.md`, which walks you through writing an
@@ -119,7 +132,8 @@ the first `sync`. It only bounds the initial backfill; later syncs are increment
 
 `bean.py sync [source] [--rebuild] [--since N]` — fetches changes and re-embeds **only what
 changed**. `--rebuild` ignores cursors and re-fetches back `--since`, re-embedding every doc — run
-it to apply a chunking or embedding-model change to already-indexed docs.
+it to apply a chunking or embedding-model change to already-indexed docs. Sync is resumable: the
+embed phase checkpoints per document, so an interrupted run picks up where it left off.
 
 **Never run `sync` on your own.** It is the one command you do not run unprompted — it hits the
 user's live services and can take minutes. Run it only when the user explicitly asks. When a
@@ -144,7 +158,7 @@ There is no routing command. Write the ref directly into the source's config fil
 list names `bean.py init` prints (e.g. `slack.[channels]`, `github.[repos]`), then suggest
 `/bean sync`.
 
-## `plugins` — connectors beyond the core 12
+## `plugins` — connectors beyond the core 10
 
 - `bean.py plugins list` — the core set plus any drop-in plugin files loaded from `~/.bean/plugins/`.
 - **A source with no bundled connector?** Author one: read
