@@ -187,6 +187,24 @@ The default `auto` backend takes embedded text where it exists and OCRs only the
 none. OCR stays opt-in because it's slow: Unlimited-OCR is high quality but ~40s/page on CPU, far
 too slow to run by default, so born-digital text (pymupdf) is the fast default path.
 
+## Indexing speed
+
+Everything runs locally on CPU, so the first sync of a big backlog takes real time. Rough numbers on
+a 2024 laptop (Apple M3 Pro, no GPU), with the default `model2vec` embedder:
+
+| Work | Throughput | So a first sync of… |
+|------|-----------|---------------------|
+| **Text/office docs** (Slack, Docs, wikis, Markdown, `.docx`/`.pptx`/`.xlsx`, comments) | **~70–110 docs/sec** (≈300k/hour) | 50,000 docs ≈ **8–12 min** |
+| **Born-digital PDFs** (embedded text, pymupdf — the default) | **~350 pages/sec** | basically instant; a 300-page PDF ≈ 1 sec |
+| **Scanned PDFs** (`ocr.backend = unlimited-ocr`, opt-in) | **~40 sec/page** (~1.5 pages/min) | 700 scanned pages ≈ **8 hours** |
+
+Takeaways: text and born-digital PDFs index in minutes even for a large corpus — re-syncs only touch
+what changed, so they're far quicker. **Scanned PDFs are the slow path.** If you point bean at a pile
+of scans with OCR on, plan on ~40 seconds per page and **leave the laptop running overnight** — a few
+hundred pages is an evening, a few thousand is a couple of nights. Sync is resumable, so an interrupted
+overnight run picks up where it left off. (One-time downloads on first use, excluded above: the
+embedding model ~30 MB, and the OCR model ~6 GB the first time you enable it.)
+
 ## How it works
 
 - **Sources.** Each connector has a cheap change signal — a revision id, an `updated_at`, a git
