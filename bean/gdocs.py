@@ -1,23 +1,31 @@
-"""Google Docs source. Auth rides on gcloud (`gcloud auth login --enable-gdrive-access`
+"""Google Drive source. Auth rides on gcloud (`gcloud auth login --enable-gdrive-access`
 uses Google's own pre-verified OAuth client — no GCP project, no consent screen to set up);
 `gcloud auth print-access-token` mints Drive-scoped tokens per sync. Change detection is
-per-doc headRevisionId with the content hash as final authority. Bodies come from the Drive
-export endpoint as Markdown, falling back to plain text."""
+per-file headRevisionId with the content hash as final authority. Google Docs come from the
+Drive export endpoint as Markdown (falling back to plain text); PDFs are downloaded and run
+through the shared PDF extractor (`bean/pdf.py`, same OCR backend as local files)."""
 
 from __future__ import annotations
 
+import os
 import re
 import shutil
 import subprocess
+import tempfile
 import time
 from datetime import datetime, timedelta, timezone
 from urllib.parse import urlencode
 
 from .http import AuthError, api_get, api_json
+from .pdf import extract_pdf
 from .store import Store
 from .workspace import load_credential, save_credential
 
 API = "https://www.googleapis.com/drive/v3"
+PDF_MIME = "application/pdf"
+# Files bean knows how to index: native Google Docs (exported to Markdown) and PDFs (extracted).
+INDEXABLE_MIME = ("(mimeType='application/vnd.google-apps.document' "
+                  f"or mimeType='{PDF_MIME}') and trashed=false")
 DOC_FIELDS = ("id,name,createdTime,modifiedTime,headRevisionId,webViewLink,trashed,mimeType,"
               "lastModifyingUser(displayName,emailAddress),owners(displayName,emailAddress)")
 
@@ -104,8 +112,10 @@ def _crawl(call, q: str) -> list[str]:
 
 
 def sync(store: Store, config: dict, *, token_fn=access_token, fetch=None,
-         full: bool = False, lookback_days: int = 30, log=lambda m: None) -> dict:
+         full: bool = False, lookback_days: int = 30, ocr: dict | None = None,
+         extract=extract_pdf, log=lambda m: None) -> dict:
     token = token_fn()
+    ocr = ocr or {}
 
     def call(path: str, raw: bool = False):
         nonlocal token
@@ -116,22 +126,20 @@ def sync(store: Store, config: dict, *, token_fn=access_token, fetch=None,
             token = token_fn(True)  # expired mid-sync — refresh once
             return (api_get if raw else api_json)(url, {"Authorization": f"Bearer {token}"}, fetch=fetch)
 
-    DOC_MIME = "mimeType='application/vnd.google-apps.document' and trashed=false"
-
-    # Explicit adds narrow the scope; with none configured, auto-index the docs you own.
+    # Explicit adds narrow the scope; with none configured, auto-index the files you own.
     doc_ids = list(dict.fromkeys(config.get("docs", [])))
     for folder in config.get("folders", []):
-        doc_ids += [i for i in _crawl(call, f"'{folder}' in parents and {DOC_MIME}") if i not in doc_ids]
+        doc_ids += [i for i in _crawl(call, f"'{folder}' in parents and {INDEXABLE_MIME}") if i not in doc_ids]
 
     auto = not config.get("docs") and not config.get("folders")
     if auto:
-        q = f"'me' in owners and {DOC_MIME}"
+        q = f"'me' in owners and {INDEXABLE_MIME}"
         if lookback_days and lookback_days > 0:
             cutoff = (datetime.now(timezone.utc) - timedelta(days=lookback_days)).strftime("%Y-%m-%dT%H:%M:%SZ")
             q += f" and modifiedTime > '{cutoff}'"
         window = "all time" if not (lookback_days and lookback_days > 0) else f"last {lookback_days}d"
         found = _crawl(call, q)
-        log(f"gdocs: auto-indexing docs you own ({window}) — {len(found)} in window")
+        log(f"gdocs: auto-indexing files you own ({window}) — {len(found)} in window")
         doc_ids += [i for i in found if i not in doc_ids]
         # Retain docs already indexed so aging out of the window doesn't evict them; re-stat below
         # confirms they still exist and are accessible (trash/access-loss is what removes them).
@@ -150,9 +158,14 @@ def sync(store: Store, config: dict, *, token_fn=access_token, fetch=None,
         existing = store.get("gdocs", doc_id)
         if not full and existing and existing.revision_id and existing.revision_id == meta.get("headRevisionId"):
             continue
-        body = _export(call, doc_id)
-        if body is None:
-            log(f"gdocs: {meta.get('name', doc_id)} skipped (export failed)")
+        if meta.get("mimeType") == PDF_MIME:
+            body = _pdf_body(call, doc_id, ocr, extract, log)
+            fail = "PDF download/extract failed"
+        else:
+            body = _export(call, doc_id)
+            fail = "export failed"
+        if not body:
+            log(f"gdocs: {meta.get('name', doc_id)} skipped ({fail})")
             continue
         if store.upsert("gdocs", doc_id, title=meta.get("name", doc_id),
                         url=meta.get("webViewLink"), revision_id=meta.get("headRevisionId"),
@@ -184,3 +197,18 @@ def _export(call, doc_id: str) -> str | None:
         if res.ok:
             return res.text
     return None
+
+
+def _pdf_body(call, doc_id: str, ocr: dict, extract, log) -> str | None:
+    """Download a native PDF's bytes and run them through the shared extractor. Uses a temp file
+    because the extractor (pymupdf/OCR) works on a path — cleaned up regardless of outcome."""
+    res = call(f"/files/{doc_id}?alt=media", raw=True)
+    if not res.ok:
+        return None
+    tmp = tempfile.NamedTemporaryFile(prefix="bean-gdrive-", suffix=".pdf", delete=False)
+    try:
+        tmp.write(res.raw)
+        tmp.close()
+        return extract(tmp.name, ocr, log=log)
+    finally:
+        os.unlink(tmp.name)

@@ -48,7 +48,7 @@ bean ships **12 core connectors**, always on:
 | Source | Auth | What it indexes |
 |--------|------|-----------------|
 | **Slack** | user token (`xoxp-…`) | channels, cut into per-week digests with threads as sections |
-| **Google Drive** | gcloud sign-in | Docs as Markdown; whole Drive folders |
+| **Google Drive** | gcloud sign-in | Docs as Markdown and PDFs (extracted); whole Drive folders |
 | **Notion** | integration token | pages and their nested blocks |
 | **GitHub** | personal access token | issues and pull requests (body + comments) |
 | **Confluence** | Cloud (email + API token) or Server/DC (PAT) | space pages (storage HTML → text) |
@@ -155,15 +155,16 @@ Changing an **index-shape** knob (embedding model, any `chunking.*`, enabling `r
 | `sync.stale_days` | `7` | warn (never auto-sync) when the index is older than this; 0 = off |
 | `ocr.backend` / `model` / `dpi` | `auto` / `baidu/Unlimited-OCR` / `200` | PDF text backend (below) |
 | `slack.lookback_days` | `14` | recent Slack history re-fetched each sync to catch edits |
-| `gdocs.lookback_days` | `30` | window for auto-indexing Docs you own (0 = all) |
+| `gdocs.lookback_days` | `30` | window for auto-indexing Docs + PDFs you own (0 = all) |
 
 The embedding model downloads automatically the first time you actually sync or search — not at
 setup — and is cached afterward.
 
 ## PDF parsing
 
-bean reads PDFs in local folders. Born-digital PDFs use embedded text (pymupdf, a base
-dependency). For scans, handwriting, or complex layouts, set `ocr.backend` to `unlimited-ocr` and
+bean reads PDFs in local folders and native PDFs in Google Drive — both go through the same
+extractor and honor the `ocr.backend` setting below. Born-digital PDFs use embedded text (pymupdf, a
+base dependency). For scans, handwriting, or complex layouts, set `ocr.backend` to `unlimited-ocr` and
 bean runs pages through [baidu/Unlimited-OCR](https://github.com/baidu/Unlimited-OCR), a
 vision-language OCR model. You install nothing: bean provisions the OCR toolchain (torch,
 transformers) into its own venv the first time OCR runs, the same way the embedding model

@@ -145,13 +145,17 @@ def gfetch(url, headers):
         return res(200, {"files": [{"id": "docB"}]})
     m = re.match(r"^/drive/v3/files/([^/]+)(/export)?$", u.path)
     d = DOCS[m.group(1)]
+    qs = parse_qs(u.query)
+    if qs.get("alt") == ["media"]:  # PDF binary download
+        return res(200, d["body"])
     if not m.group(2):
+        mime = "application/pdf" if d.get("pdf") else "application/vnd.google-apps.document"
         return res(200, {"id": m.group(1), "name": d["name"], "headRevisionId": d["rev"],
                          "webViewLink": f"https://docs.google.com/document/d/{m.group(1)}", "trashed": False,
-                         "modifiedTime": "2026-05-01T00:00:00Z", "mimeType": "application/vnd.google-apps.document",
+                         "modifiedTime": "2026-05-01T00:00:00Z", "mimeType": mime,
                          "lastModifyingUser": {"displayName": "Grace Hopper"}})
     exports["n"] += 1
-    mime = parse_qs(u.query)["mimeType"][0]
+    mime = qs["mimeType"][0]
     if mime == "text/markdown" and not d["md"]:
         return res(400, "no markdown")
     return res(200, d["body"])
@@ -195,6 +199,26 @@ with Store(gws) as store:
 
     gdocs.sync(store, {"docs": ["docA"], "folders": []}, token_fn=token_fn, fetch=gfetch401)
     ok(state["forces"] == 1, "mid-sync 401 refreshes the token once")
+
+# gdrive PDFs: a native PDF is downloaded (alt=media) and run through the shared extractor, not
+# the Docs export path. The extractor is injected so the routing is exercised without pymupdf.
+DOCS["docP"] = {"name": "Scanned Report", "rev": "p1", "body": "%PDF-1.4 binary…", "pdf": True}
+with Store(Workspace(repo("gdocs-pdf"))) as store:
+    calls = {"n": 0}
+
+    def fake_extract(path, ocr, log=lambda m: None):
+        calls["n"] += 1
+        return "quarterly revenue and invoice totals"
+
+    sp = gdocs.sync(store, {"docs": ["docP"], "folders": []},
+                    token_fn=lambda force=False: "tok", fetch=gfetch, extract=fake_extract)
+    ok(sp["changed"] == ["docP"], f"gdrive PDF ingested ({sp['changed']})")
+    ok(calls["n"] == 1, "PDF routed through the extractor, not the Docs export path")
+    ok("invoice totals" in store.get("gdocs", "docP").body, "extracted PDF text stored as body")
+    ok(store.get("gdocs", "docP").mime == "application/pdf", "PDF mime captured from Drive metadata")
+    sp2 = gdocs.sync(store, {"docs": ["docP"], "folders": []},
+                     token_fn=lambda force=False: "tok", fetch=gfetch, extract=fake_extract)
+    ok(sp2["changed"] == [] and calls["n"] == 1, "unchanged PDF revision skips re-download and re-extract")
 
 # auto-index: empty config crawls the docs you own; the query carries an ownership + window filter
 autodocs = {"m1": {"name": "Owned One", "rev": "a1", "body": "alpha", "md": True},

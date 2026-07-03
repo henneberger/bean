@@ -67,6 +67,10 @@ make clean                                     # remove dist/ build/ *.egg-info 
 Newest first. Dates are the tag date.
 
 ### Unreleased
+- **Google Drive PDFs** — the Drive connector now indexes native PDFs (owned files + tracked
+  folders), downloaded and run through the shared PDF extractor (`bean/pdf.py`, honoring
+  `ocr.backend`) — the same path local-file PDFs use. Adds a `content` bytes carrier to the HTTP
+  `Response` so binary downloads survive the injectable fetch seam.
 - **CI/release workflows** — `.github/workflows/ci.yml` (build + offline tests on push/PR across
   Python 3.10–3.12) and `release.yml` (rebuilds artifacts and publishes a GitHub Release on a
   `vX.Y.Z` tag). Both reuse `scripts/release.py check`/`build`.

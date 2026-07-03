@@ -11,7 +11,7 @@ implements both and defaults to the path an individual can self-serve without an
 | Connector | Auth (individual-friendly default) | Indexes |
 |-----------|------------------------------------|---------|
 | **Slack** | user token `xoxp-…` | channels → per-week digests, threads as sections |
-| **Google Drive** | gcloud sign-in | Docs as Markdown; owned docs by default |
+| **Google Drive** | gcloud sign-in | Docs as Markdown + PDFs (extracted); owned files by default |
 | **Notion** | integration token `secret_…` | pages + nested blocks |
 | **GitHub** | PAT `ghp_…` | issues, PRs (+comments) |
 | **Confluence** | Cloud email+token **or** Server/DC PAT | space pages, storage HTML → text |

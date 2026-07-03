@@ -22,10 +22,16 @@ class Response:
     status: int
     text: str
     headers: dict
+    content: bytes | None = None  # raw bytes for binary downloads (e.g. PDFs); text stays lossy
 
     @property
     def ok(self) -> bool:
         return 200 <= self.status < 300
+
+    @property
+    def raw(self) -> bytes:
+        """The body as bytes — the real content when present, else the text re-encoded."""
+        return self.content if self.content is not None else self.text.encode("utf-8", "replace")
 
     def json(self):
         import json
@@ -41,7 +47,7 @@ def _requests_fetch(url: str, headers: dict, method: str = "GET", body=None) -> 
         else:
             kw["json"] = body  # dict/list → JSON body
     r = requests.request(method, url, **kw)
-    return Response(status=r.status_code, text=r.text, headers=dict(r.headers))
+    return Response(status=r.status_code, text=r.text, headers=dict(r.headers), content=r.content)
 
 
 def _send(url: str, headers, method: str, body, *, fetch, retries: int, sleep) -> Response:

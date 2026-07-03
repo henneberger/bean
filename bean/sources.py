@@ -52,7 +52,8 @@ class Source:
 # -- adapters (normalize each module's native signature to the registry contract) ---------------
 def _gdocs_sync(store, cfg, *, settings, fetch, full, since_days, log):
     lookback = cfg.get("lookback_days", settings.get("gdocs", {}).get("lookback_days", 30))
-    return gdocs.sync(store, cfg, fetch=fetch, full=full, lookback_days=lookback, log=log)
+    return gdocs.sync(store, cfg, fetch=fetch, full=full, lookback_days=lookback,
+                      ocr=settings.get("ocr", {}), log=log)
 
 
 def _slack_sync(store, cfg, *, settings, fetch, full, since_days, log):
