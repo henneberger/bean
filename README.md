@@ -170,7 +170,7 @@ never re-scan a window on every sync. `sync --rebuild` ignores the cursor to re-
 
 **The embedder is pluggable.** The default `model2vec` backend (`minishlab/potion-retrieval-32M`) is
 a static CPU embedder that runs ~100× faster than the old fastembed default. Keyword fusion and
-refusable results absorb the small accuracy gap, so bean is speed-first out of the box. Switch
+refusable results absorb the small accuracy gap. Switch
 `embedding.backend` to `fastembed` for an ONNX transformer (e.g. `BAAI/bge-small-en-v1.5`), or point
 `embedding.plugin` at a `.py` exposing `embed(texts)` to bring any library or API. The model
 downloads automatically the first time you sync or search (not at setup) and is cached afterward.
@@ -185,8 +185,7 @@ vision-language OCR model. You install nothing: bean provisions the OCR toolchai
 transformers) into its own venv the first time OCR runs, the same way the embedding model downloads
 itself. It runs on CUDA, Apple MPS, or CPU, whichever the machine has. The default `auto` backend
 takes embedded text where it exists and OCRs only the pages that have none. OCR stays opt-in because
-it's slow: Unlimited-OCR is high quality but ~40s/page on CPU. Born-digital text (pymupdf) is the
-fast default path.
+it's slow: Unlimited-OCR is high quality but ~40s/page on CPU.
 
 ## Indexing speed
 
@@ -199,12 +198,10 @@ a 2024 laptop (Apple M3 Pro, no GPU), with the default `model2vec` embedder:
 | **Born-digital PDFs** (embedded text, pymupdf, the default) | **~350 pages/sec** | basically instant; a 300-page PDF ≈ 1 sec |
 | **Scanned PDFs** (`ocr.backend = unlimited-ocr`, opt-in) | **~40 sec/page** (~1.5 pages/min) | 700 scanned pages ≈ **8 hours** |
 
-Takeaways: text and born-digital PDFs index in minutes even for a large corpus, and re-syncs only
-touch what changed, so they're far quicker. **Scanned PDFs are the slow path.** If you point bean at
-a pile of scans with OCR on, plan on ~40 seconds per page and **leave the laptop running overnight**.
-A few hundred pages is an evening; a few thousand is a couple of nights. Sync is resumable, so an
-interrupted overnight run picks up where it left off. (One-time downloads on first use, excluded
-above: the embedding model ~30 MB, and the OCR model ~6 GB the first time you enable it.)
+**Scanned PDFs are the slow path.** With OCR on, plan on ~40 seconds per page and **leave the laptop
+running overnight** — a few hundred pages is an evening, a few thousand a couple of nights. Sync is
+resumable, so an interrupted run picks up where it left off. (One-time downloads on first use,
+excluded above: the embedding model ~30 MB, and the OCR model ~6 GB the first time you enable it.)
 
 ## How it works
 
