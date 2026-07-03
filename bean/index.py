@@ -31,13 +31,20 @@ def reindex_doc(ws, *, source: str, doc_id: str, title: str, url: str | None,
     """Replace every chunk row for one document (delete + add). Idempotent per snapshot."""
     db = _db(ws)
     tbl = _table(db)
-    if tbl is not None:
-        tbl.delete(f"source = '{_esc(source)}' AND doc_id = '{_esc(doc_id)}'")
     rows = [
         {"id": c.id, "source": source, "doc_id": doc_id, "title": title, "url": url or "",
          "start": c.start, "end": c.end, "text": c.text, "vector": v}
         for c, v in zip(chunks, vectors) if v
     ]
+    # An embedding-model swap changes the vector width; the existing table's fixed-size vector
+    # column can't hold the new vectors (Lance raises on the cast). A dimension change requires a
+    # `--rebuild`, which re-embeds every doc — so drop the stale table and let it be recreated at
+    # the new width on the first write below.
+    if tbl is not None and rows and _vector_dim(tbl) not in (None, len(rows[0]["vector"])):
+        db.drop_table(TABLE)
+        tbl = None
+    if tbl is not None:
+        tbl.delete(f"source = '{_esc(source)}' AND doc_id = '{_esc(doc_id)}'")
     if not rows:
         return 0
     if tbl is None:
@@ -45,6 +52,14 @@ def reindex_doc(ws, *, source: str, doc_id: str, title: str, url: str | None,
     else:
         tbl.add(rows)
     return len(rows)
+
+
+def _vector_dim(tbl) -> int | None:
+    """Width of the stored `vector` column, or None if it can't be read."""
+    try:
+        return tbl.schema.field("vector").type.list_size
+    except Exception:
+        return None
 
 
 def delete_doc(ws, source: str, doc_id: str) -> None:

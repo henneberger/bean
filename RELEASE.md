@@ -3,7 +3,7 @@
 bean ships two things from one repo, versioned together:
 
 - the **`bean` Python package** (`pyproject.toml`, hatchling) — the CLI/engine, and
-- the **Claude Code plugin** (`.claude-plugin/plugin.json`, `SKILL.md`, `skills/`, `scripts/bean.py`)
+- the **Claude Code plugin** (`.claude-plugin/plugin.json`, `skills/bean/SKILL.md`, other `skills/`, `scripts/bean.py`)
   — distributed as the repo itself; the marketplace entry points at `./`.
 
 A release = a single version bumped across both manifests, a green offline test suite, built
@@ -59,7 +59,7 @@ make clean                                     # remove dist/ build/ *.egg-info 
 ## Pre-release checklist
 
 - `make check` is green (tests are fully offline — fake HTTP, fake embedder, real DuckDB + Lance).
-- README / SKILL.md reflect any new commands or config.
+- README / skills/bean/SKILL.md reflect any new commands or config.
 - The Changelog below has an entry for the version.
 - Working tree is clean.
 
@@ -68,10 +68,22 @@ make clean                                     # remove dist/ build/ *.egg-info 
 Newest first. Dates are the tag date.
 
 ### Unreleased
+- **Fix: `/bean` disappeared again** — the main skill moved from the repo-root `SKILL.md` to
+  `skills/bean/SKILL.md`. Re-adding `skills/connect-*/` (per-connector setup) had re-triggered the
+  same Claude Code behaviour 6b38005 fixed: once a `skills/` dir exists, only skills under it are
+  discovered and the root `SKILL.md` is ignored, so `/bean` vanished while `bean:connect-*` stayed.
+  Keeping every skill (including the primary one) under `skills/` is the durable layout — do **not**
+  reintroduce a root-level `SKILL.md`.
+- **Default embedder → GGUF** — the default embedding backend is now `gguf`
+  (`embeddinggemma-300M-Q8_0`), a quantized transformer run in-process via `llama-cpp-python` for
+  higher local accuracy; `embedding.model` takes a bare alias, an `hf:owner/repo/file.gguf` reference
+  (e.g. `hf:Qwen/Qwen3-Embedding-0.6B-GGUF/Qwen3-Embedding-0.6B-Q8_0.gguf`), or a local `.gguf` path.
+  `model2vec` (fast static) and `fastembed` remain as opt-in backends. Existing indexes need a
+  `bean sync --rebuild` to re-embed onto the new vectors.
 - **Connectors + retrieval batch** — the 11 built-in connectors moved to `bean/connectors/` and
   Notion was removed (**10 core** now); Google Drive indexes each comment as its own
   author-attributed, timestamped document (`gdocs.comments`); the embedder is pluggable under
-  `embedding` (default fast `model2vec`/`minishlab/potion-retrieval-32M`, plus `fastembed` and a
+  `embedding` (`model2vec`/`minishlab/potion-retrieval-32M`, `fastembed`, and a
   `plugin` escape hatch); new `bean sql` runs read-only SELECT/WITH over the DuckDB store (no query
   prints the schema, `--global` for the shared store); sync checkpoints the embed phase per-document
   so an interrupted run resumes cleanly; local files gained `.pptx`/`.xlsx`/`.html`; each connector

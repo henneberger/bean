@@ -408,7 +408,7 @@ ok(again["changed"] == [] and again["chunks"] == 0, "re-sync with no upstream ch
 
 # -- config layering + coercion -----------------------------------------------------------------
 base = cfgmod.resolve()
-ok(base["embedding"]["model"] == "minishlab/potion-retrieval-32M", "defaults resolve with no config file")
+ok(base["embedding"]["model"] == "embeddinggemma-300M-Q8_0", "defaults resolve with no config file")
 cfgmod.save_global({"embedding": {"model": "custom/model"}, "search": {"hybrid": False}})
 merged = cfgmod.resolve()
 ok(merged["embedding"]["model"] == "custom/model" and merged["chunking"]["lines"] == 40,
@@ -437,6 +437,19 @@ from bean import embed as _embed  # noqa: E402
 ok(_embed.identity({"backend": "model2vec", "model": "minishlab/potion-retrieval-32M"})
    == "model2vec:minishlab/potion-retrieval-32M", "identity names backend + model")
 ok(_embed.identity({"plugin": "/x/e.py"}) == "plugin:/x/e.py", "identity names a plugin")
+ok(_embed.identity({}) == "gguf:", "identity defaults to the gguf backend")
+ok(_embed._resolve_gguf("embeddinggemma-300M-Q8_0")
+   == (None, "ggml-org/embeddinggemma-300M-GGUF", "embeddinggemma-300M-Q8_0.gguf"),
+   "a bare alias resolves to its HF repo + file")
+ok(_embed._resolve_gguf("hf:Qwen/Qwen3-Embedding-0.6B-GGUF/Qwen3-Embedding-0.6B-Q8_0.gguf")
+   == (None, "Qwen/Qwen3-Embedding-0.6B-GGUF", "Qwen3-Embedding-0.6B-Q8_0.gguf"),
+   "an hf: reference splits into repo + file")
+_gguf = Path(tempfile.mkdtemp(prefix="bean-gguf-")) / "m.gguf"; _gguf.write_bytes(b"GGUF")
+ok(_embed._resolve_gguf(str(_gguf)) == (str(_gguf), None, None), "a local .gguf path is used directly")
+try:
+    _embed._resolve_gguf("not-a-real-model"); ok(False, "an unresolvable gguf ref raises")
+except RuntimeError:
+    ok(True, "an unresolvable gguf ref raises")
 _edir = Path(tempfile.mkdtemp(prefix="bean-embed-"))
 (_edir / "e.py").write_text(
     "def embed(texts):\n"

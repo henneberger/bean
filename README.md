@@ -122,7 +122,7 @@ stay in `~/.bean/credentials/`, mode 0600).
 ```bash
 /bean config list                              # the full resolved config
 /bean config get search.recency_decay          # one value
-/bean config set embedding.backend fastembed     # switch to the higher-accuracy ONNX embedder
+/bean config set embedding.model hf:Qwen/Qwen3-Embedding-0.6B-GGUF/Qwen3-Embedding-0.6B-Q8_0.gguf  # a bigger GGUF
 /bean config set search.rerank.enabled true
 /bean sync --rebuild                            # re-fetch + re-embed to apply a model/chunk change
 ```
@@ -134,8 +134,8 @@ configured.
 
 | Path | Default | What it does |
 |------|---------|--------------|
-| `embedding.backend` | `model2vec` | `model2vec` (fast static/CPU embedder) or `fastembed` (ONNX transformer, higher accuracy) (⟳ sync --rebuild) |
-| `embedding.model` | `minishlab/potion-retrieval-32M` | model for the backend; for fastembed use e.g. `BAAI/bge-small-en-v1.5` (⟳ sync --rebuild) |
+| `embedding.backend` | `gguf` | `gguf` (in-process GGUF transformer via llama-cpp-python), `model2vec` (fast static/CPU embedder), or `fastembed` (ONNX transformer) (⟳ sync --rebuild) |
+| `embedding.model` | `embeddinggemma-300M-Q8_0` | model for the backend; gguf takes a bare alias, an `hf:owner/repo/file.gguf` ref (e.g. `hf:Qwen/Qwen3-Embedding-0.6B-GGUF/Qwen3-Embedding-0.6B-Q8_0.gguf`), or a local `.gguf` path; fastembed e.g. `BAAI/bge-small-en-v1.5` (⟳ sync --rebuild) |
 | `embedding.plugin` | `null` | path/import path to a `.py` exposing `embed(texts)` (and optional `embed_query`); overrides backend/model — any library/API that returns vectors (⟳ sync --rebuild) |
 | `embedding.batch_size` | `64` | embed batch size |
 | `chunking.lines` / `overlap` | `40` / `8` | window height and shared lines (⟳) |
@@ -168,12 +168,16 @@ since chat is short.
 **first** sync's backfill. After that each source tracks a cursor and pulls just what's new, so you
 never re-scan a window on every sync. `sync --rebuild` ignores the cursor to re-pull within `--since`.
 
-**The embedder is pluggable.** The default `model2vec` backend (`minishlab/potion-retrieval-32M`) is
-a static CPU embedder that runs ~100× faster than the old fastembed default. Keyword fusion and
-refusable results absorb the small accuracy gap. Switch
-`embedding.backend` to `fastembed` for an ONNX transformer (e.g. `BAAI/bge-small-en-v1.5`), or point
-`embedding.plugin` at a `.py` exposing `embed(texts)` to bring any library or API. The model
-downloads automatically the first time you sync or search (not at setup), and bean caches it after.
+**The embedder is pluggable.** The default `gguf` backend runs a quantized GGUF transformer
+(`embeddinggemma-300M-Q8_0`) in-process via llama-cpp-python — fully local, CPU-friendly, and higher
+accuracy than a static embedder. Point `embedding.model` at any bare alias, an
+`hf:owner/repo/file.gguf` reference (e.g.
+`hf:Qwen/Qwen3-Embedding-0.6B-GGUF/Qwen3-Embedding-0.6B-Q8_0.gguf`), or a local `.gguf` file. For a
+faster, lower-accuracy option set `embedding.backend` to `model2vec`
+(`minishlab/potion-retrieval-32M`, a static CPU embedder ~100× faster than a transformer) or
+`fastembed` for an ONNX transformer (e.g. `BAAI/bge-small-en-v1.5`); or point `embedding.plugin` at a
+`.py` exposing `embed(texts)` to bring any library or API. The model downloads automatically the
+first time you sync or search (not at setup), and bean caches it after.
 
 ## PDF parsing
 
@@ -190,18 +194,21 @@ it's slow: Unlimited-OCR is high quality but ~40s/page on CPU.
 ## Indexing speed
 
 Everything runs locally on CPU, so the first sync of a big backlog takes real time. Rough numbers on
-a 2024 laptop (Apple M3 Pro, no GPU), with the default `model2vec` embedder:
+a 2024 laptop (Apple M3 Pro, no GPU). The default `gguf` embedder is a 300M-parameter transformer
+(`embeddinggemma-300M-Q8_0`), so every chunk is a full forward pass — text is the throughput floor,
+and a large first sync is an hours-not-minutes job:
 
 | Work | Throughput | So a first sync of… |
 |------|-----------|---------------------|
-| **Text/office docs** (Slack, Docs, wikis, Markdown, `.docx`/`.pptx`/`.xlsx`, comments) | **~70–110 docs/sec** (≈300k/hour) | 50,000 docs ≈ **8–12 min** |
+| **Text/office docs** (Slack, Docs, wikis, Markdown, `.docx`/`.pptx`/`.xlsx`, comments) | **~7 chunks/sec** (≈25k/hour) | 50,000 docs (~4 chunks each) ≈ **8 hours** |
 | **Born-digital PDFs** (embedded text, pymupdf, the default) | **~350 pages/sec** | basically instant; a 300-page PDF ≈ 1 sec |
 | **Scanned PDFs** (`ocr.backend = unlimited-ocr`, opt-in) | **~40 sec/page** (~1.5 pages/min) | 700 scanned pages ≈ **8 hours** |
 
 **Scanned PDFs are the slow path.** With OCR on, plan on ~40 seconds per page and **leave the laptop
 running overnight**. A few hundred pages is an evening. A few thousand is a couple of nights. Sync is
 resumable, so an interrupted run picks up where it left off. (One-time downloads on first use,
-excluded above: the embedding model ~30 MB, and the OCR model ~6 GB the first time you enable it.)
+excluded above: the default `embeddinggemma-300M-Q8_0` GGUF ~320 MB, and the OCR model ~6 GB the
+first time you enable it.)
 
 ## How it works
 

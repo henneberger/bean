@@ -1,10 +1,13 @@
 """Embeddings — pluggable, because most models need their own code and all bean wants back is a
-vector. Three ways to embed, resolved from `settings["embedding"]`:
+vector. Four ways to embed, resolved from `settings["embedding"]`:
 
-  - backend "model2vec" (DEFAULT): a static token-lookup embedder (minishlab/potion-*). No
-    transformer forward pass, so it's ~100x faster on CPU than an ONNX transformer — the right
-    trade for a speed-first hybrid retriever where keyword fusion covers exact matches.
-  - backend "fastembed": an ONNX transformer (e.g. BAAI/bge-small-en-v1.5) for higher accuracy.
+  - backend "gguf" (DEFAULT): a quantized GGUF transformer run in-process via llama-cpp-python
+    (google/embeddinggemma-300M-Q8_0). Higher accuracy than a static embedder, still CPU-friendly
+    and fully local. `model` is a bare alias (e.g. `embeddinggemma-300M-Q8_0`), an
+    `hf:owner/repo/file.gguf` reference, or a path to a local .gguf file.
+  - backend "model2vec": a static token-lookup embedder (minishlab/potion-*). No transformer
+    forward pass, so it's ~100x faster on CPU than a transformer — the speed-first choice.
+  - backend "fastembed": an ONNX transformer (e.g. BAAI/bge-small-en-v1.5).
   - a PLUGIN: set `embedding.plugin` to a .py path (or import path) exposing
     `embed(texts) -> list[list[float]]` and optionally `embed_query(text) -> list[float]`. This
     overrides backend/model, so any library / API / custom model works as long as it returns vectors.
@@ -26,7 +29,7 @@ def identity(emb: dict) -> str:
     """A stable name for the configured embedder, stored with the index so a change is detectable."""
     if emb.get("plugin"):
         return f"plugin:{emb['plugin']}"
-    return f"{emb.get('backend', 'model2vec')}:{emb.get('model', '')}"
+    return f"{emb.get('backend', 'gguf')}:{emb.get('model', '')}"
 
 
 def embedder(emb: dict):
@@ -47,23 +50,71 @@ def _resolve(emb: dict):
         if emb.get("plugin"):
             _cache[key] = _Plugin(emb["plugin"])
         else:
-            backend = (emb.get("backend") or "model2vec").lower()
+            backend = (emb.get("backend") or "gguf").lower()
             model = emb.get("model") or _DEFAULT_MODEL.get(backend, "")
-            if backend == "model2vec":
+            if backend == "gguf":
+                _cache[key] = _LlamaCpp(model)
+            elif backend == "model2vec":
                 _cache[key] = _Model2Vec(model)
             elif backend == "fastembed":
                 _cache[key] = _Fastembed(model)
             else:
                 raise RuntimeError(
-                    f"unknown embedding backend {backend!r} — use 'model2vec', 'fastembed', "
+                    f"unknown embedding backend {backend!r} — use 'gguf', 'model2vec', 'fastembed', "
                     "or point embedding.plugin at a module that returns vectors.")
     return _cache[key]
 
 
 _DEFAULT_MODEL = {
+    "gguf": "embeddinggemma-300M-Q8_0",
     "model2vec": "minishlab/potion-retrieval-32M",
     "fastembed": "BAAI/bge-small-en-v1.5",
 }
+
+# Bare aliases → (HF repo, file) so a short `model` name resolves to a downloadable GGUF. Anything
+# not listed here is taken as an `hf:owner/repo/file.gguf` reference or a local .gguf path.
+_GGUF_ALIASES = {
+    "embeddinggemma-300M-Q8_0": ("ggml-org/embeddinggemma-300M-GGUF", "embeddinggemma-300M-Q8_0.gguf"),
+}
+
+
+class _LlamaCpp:
+    """A quantized GGUF embedder run in-process via llama-cpp-python. `name` is a bare alias, an
+    `hf:owner/repo/file.gguf` reference, or a path to a local .gguf file."""
+    def __init__(self, name: str):
+        try:
+            from llama_cpp import Llama
+        except ImportError as err:
+            raise RuntimeError("the gguf backend needs `pip install llama-cpp-python`") from err
+        local, repo_id, filename = _resolve_gguf(name)
+        if local:
+            self.model = Llama(model_path=local, embedding=True, n_ctx=2048, verbose=False)
+        else:
+            self.model = Llama.from_pretrained(
+                repo_id=repo_id, filename=filename, embedding=True, n_ctx=2048, verbose=False)
+
+    def embed(self, texts, batch):
+        return [list(map(float, v)) for v in self.model.embed(list(texts))]
+
+    def query(self, text):
+        return self.embed([text], 1)[0]
+
+
+def _resolve_gguf(name: str):
+    """(local_path | None, repo_id, filename). A local .gguf path returns (path, None, None); a bare
+    alias or `hf:owner/repo/file.gguf` reference returns (None, repo, file) for HF download."""
+    if name in _GGUF_ALIASES:
+        return None, *_GGUF_ALIASES[name]
+    ref = name[3:] if name.startswith("hf:") else name
+    p = Path(ref).expanduser()
+    if not name.startswith("hf:") and p.suffix == ".gguf" and p.exists():
+        return str(p), None, None
+    parts = ref.split("/")
+    if len(parts) < 3 or not ref.endswith(".gguf"):
+        raise RuntimeError(
+            f"can't resolve gguf model {name!r} — use a known alias (e.g. 'embeddinggemma-300M-Q8_0'), "
+            "an 'hf:owner/repo/file.gguf' reference, or a path to a local .gguf file.")
+    return None, "/".join(parts[:2]), "/".join(parts[2:])
 
 
 class _Model2Vec:

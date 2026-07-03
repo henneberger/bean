@@ -21,10 +21,13 @@ DEFAULTS: dict = {
     "embedding": {
         # How to turn text into vectors. Changing any of these needs a `bean sync --rebuild`;
         # `bean status` warns when the index was built with a different embedder.
-        #   backend "model2vec" — fast static embedder (default), model = a minishlab/potion-* name.
+        #   backend "gguf" — quantized GGUF transformer (default) via llama-cpp-python; model = a
+        #     bare alias (embeddinggemma-300M-Q8_0), an hf:owner/repo/file.gguf ref, or a .gguf path.
+        #     Alternative: hf:Qwen/Qwen3-Embedding-0.6B-GGUF/Qwen3-Embedding-0.6B-Q8_0.gguf
+        #   backend "model2vec" — fast static embedder, model = a minishlab/potion-* name.
         #   backend "fastembed" — ONNX transformer, model = any fastembed name (e.g. BAAI/bge-*).
-        "backend": "model2vec",
-        "model": "minishlab/potion-retrieval-32M",
+        "backend": "gguf",
+        "model": "embeddinggemma-300M-Q8_0",
         "batch_size": 64,
         # A drop-in embedder overrides backend/model: a .py path (or import path) exposing
         # `embed(texts) -> list[list[float]]` (+ optional `embed_query(text)`). Most models need
