@@ -44,6 +44,15 @@ def delete_doc(ws, source: str, doc_id: str) -> None:
         tbl.delete(f"source = '{_esc(source)}' AND doc_id = '{_esc(doc_id)}'")
 
 
+def chunks_dataset(ws):
+    """The chunk table as a pylance `LanceDataset`, or None if nothing is indexed yet. This is the
+    single copy of the chunk data — DuckDB queries it directly (register + SQL) for the keyword /
+    neighbour / merge work, so there is no separate chunk mirror to keep in sync."""
+    import lance
+    path = ws.lance_dir / f"{TABLE}.lance"
+    return lance.dataset(str(path)) if path.exists() else None
+
+
 def search(ws, vector, k: int = 8, source: str | None = None) -> list[dict]:
     tbl = _table(_db(ws))
     if tbl is None:

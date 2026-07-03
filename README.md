@@ -176,10 +176,12 @@ none.
   blob sha, or a file mtime — with the content hash as the final authority. `sync` re-embeds only
   what actually changed; deletions revoke their vectors.
 - **Storage.** One DuckDB catalog per workspace holds document snapshots, revision history, sync
-  cursors, and a chunk mirror that powers keyword search and the recent/thread/neighbor tools. A
-  Lance table alongside it holds the chunk vectors. Workspaces live at `~/.bean/<repo-name>-<hash>/`,
-  keyed by the repo you run bean in. Credentials stay per user at `~/.bean/credentials/` (mode
-  0600), never inside a repo.
+  cursors, and the relationship edges; a Lance table alongside it holds the chunks (text + vectors)
+  as the single copy. There is no chunk mirror — keyword search, neighbours, and section-merge run
+  as DuckDB SQL **directly over the Lance dataset** (register + query), so DuckDB stays the
+  relational engine while chunk data lives once. Workspaces live at `~/.bean/<repo-name>-<hash>/`
+  (global connectors share `~/.bean/_global/`); credentials stay per user at `~/.bean/credentials/`
+  (mode 0600), never inside a repo.
 - **Auth.** Google rides on gcloud's own pre-verified OAuth client, so nobody sets up a GCP
   project. Slack, Notion, and GitHub take a token you paste once.
 

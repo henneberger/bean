@@ -39,16 +39,10 @@ def _embed_rows(ws, store, source, doc_id, embed_fn, chunk_cfg) -> int:
     # about; the stored/displayed text stays raw. Toggling title_prefix/large_chunks needs reembed.
     prefix = f"{doc.title}\n" if chunk_cfg.get("title_prefix") and doc.title else ""
     vectors = embed_fn([prefix + c.text for c in all_chunks]) if all_chunks else []
-    # Lance holds base + large chunks (vectors from enriched text, stored text raw).
+    # Lance is the single home for chunks (base + large; vectors from enriched text, stored text
+    # raw). Keyword search / neighbours / merge query it via DuckDB — no separate mirror to write.
     reindex_doc(ws, source=source, doc_id=doc_id, title=doc.title, url=doc.url,
                 chunks=all_chunks, vectors=vectors)
-    # The DuckDB chunk mirror (keyword search + neighbours + section merge) holds base chunks only.
-    rows = [
-        {"id": c.id, "title": doc.title, "url": doc.url or "",
-         "start": c.start, "end": c.end, "text": c.text}
-        for c, v in zip(base, vectors[:len(base)]) if v
-    ]
-    store.replace_chunks(source, doc_id, rows)
     return sum(1 for v in vectors if v)
 
 

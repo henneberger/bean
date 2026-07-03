@@ -67,6 +67,9 @@ make clean                                     # remove dist/ build/ *.egg-info 
 Newest first. Dates are the tag date.
 
 ### Unreleased
+- **One copy of chunk data** — dropped the DuckDB chunk mirror; chunks live only in Lance and the
+  keyword/neighbour/merge queries run as DuckDB SQL directly over the Lance dataset (adds `pylance`).
+  No reembed needed (chunk `ord` is derived).
 - **Connector scope** — global (shared `~/.bean/_global/` index, every repo) vs local (per-repo);
   `bean scope`, `add --global/--local`, search unions both.
 - **Retrieval upgrades** — weighted multi-query RRF (`--variant`), query-type routing, recency bias,

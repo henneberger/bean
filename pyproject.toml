@@ -10,6 +10,7 @@ license = { text = "Apache-2.0" }
 dependencies = [
     "duckdb>=1.0",
     "lancedb>=0.15",
+    "pylance>=0.9",    # the Lance engine under lancedb — lets DuckDB query the chunk dataset directly
     "requests>=2.31",
     "fastembed>=0.3",
     "pymupdf>=1.24",   # born-digital PDF text extraction (OCR is the optional extra below)

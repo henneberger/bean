@@ -1,9 +1,11 @@
-"""DuckDB catalog for a workspace: document snapshots, revision history, sync cursors.
+"""DuckDB catalog for a workspace: document snapshots, revision history, sync cursors, and the
+relationship-edge graph.
 
-Documents are the unit of sync — one row per Google Doc, one per Slack channel-week digest.
-The body lives here (there is no file mirror); Lance holds the chunk vectors. The content
-hash is the change authority: a revision bump whose text is identical updates metadata but
-re-embeds nothing.
+Documents are the unit of sync — one row per Google Doc, one per Slack channel-week digest. The
+body lives here; the content hash is the change authority (a revision bump whose text is identical
+updates metadata but re-embeds nothing). Chunks live once in Lance (text + vectors); the keyword /
+neighbour / merge queries here run as DuckDB SQL directly over that Lance dataset (register it on the
+connection, then query) — so DuckDB stays the relational engine without a duplicated chunk mirror.
 """
 
 from __future__ import annotations
@@ -28,12 +30,10 @@ CREATE TABLE IF NOT EXISTS revisions (
   source TEXT NOT NULL, doc_id TEXT NOT NULL, revision_id TEXT,
   hash TEXT NOT NULL, fetched_at TIMESTAMP DEFAULT now()
 );
--- Mirror of the chunk metadata (also in Lance): powers the keyword half of hybrid search plus
--- the recent / thread / neighbours retrieval primitives, deterministically and offline.
-CREATE TABLE IF NOT EXISTS chunks (
-  chunk_id TEXT PRIMARY KEY, source TEXT NOT NULL, doc_id TEXT NOT NULL,
-  title TEXT, url TEXT, ord INTEGER, start INTEGER, "end" INTEGER, text TEXT NOT NULL
-);
+-- No chunk table here: chunks live once in Lance. The keyword / neighbour / merge queries below run
+-- as DuckDB SQL directly over the Lance dataset (register + query), so there is a single copy of the
+-- chunk data and DuckDB stays the relational engine. Chunk `ord` is derived on the fly from line
+-- order (large coarse chunks, id '…-large', are excluded), so no reembed is needed to adopt this.
 CREATE TABLE IF NOT EXISTS state (key TEXT PRIMARY KEY, value TEXT);
 -- Lightweight relationship index: edges derived at sync time from source-native metadata
 -- (authored_by → a person, in-container → a repo/project/channel, links-to → another doc). No LLM;
@@ -67,6 +67,7 @@ class Doc:
 
 class Store:
     def __init__(self, ws):
+        self.ws = ws  # needed to reach the Lance chunk dataset for the keyword/neighbour queries
         self.con = duckdb.connect(str(ws.db_path))
         self.con.execute(SCHEMA)
         # Migrate DBs created before the metadata columns existed (CREATE IF NOT EXISTS won't add them).
@@ -127,8 +128,8 @@ class Store:
 
     def delete(self, source: str, doc_id: str) -> None:
         self.con.execute("DELETE FROM documents WHERE source=? AND doc_id=?", [source, doc_id])
-        self.con.execute("DELETE FROM chunks WHERE source=? AND doc_id=?", [source, doc_id])
         self.con.execute("DELETE FROM edges WHERE source=? AND src_doc=?", [source, doc_id])
+        # Chunk vectors live in Lance; index.delete_doc removes them (called by the sync/scope paths).
 
     def modified_map(self, pairs) -> dict:
         """{(source, doc_id): modified_at} for a set of hits — the recency signal, one query."""
@@ -156,29 +157,34 @@ class Store:
         return dict(self.con.execute(
             "SELECT source, count(*) FROM documents GROUP BY source").fetchall())
 
-    # -- chunk mirror (keyword search + recent/thread/neighbours) --------------------------------
-    def replace_chunks(self, source: str, doc_id: str, rows: list[dict]) -> None:
-        self.con.execute("DELETE FROM chunks WHERE source=? AND doc_id=?", [source, doc_id])
-        for i, r in enumerate(rows):
-            self.con.execute(
-                'INSERT INTO chunks (chunk_id, source, doc_id, title, url, ord, start, "end", text)'
-                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                [r["id"], source, doc_id, r.get("title"), r.get("url"), i,
-                 r.get("start"), r.get("end"), r["text"]],
-            )
-
-    def delete_chunks(self, source: str, doc_id: str) -> None:
-        self.con.execute("DELETE FROM chunks WHERE source=? AND doc_id=?", [source, doc_id])
-
     def _rows(self, sql: str, params: list) -> list[dict]:
         cur = self.con.execute(sql, params)
         cols = [d[0] for d in cur.description]
         return [dict(zip(cols, row)) for row in cur.fetchall()]
 
+    # -- chunk queries: DuckDB SQL run directly over the single Lance chunk dataset ----------------
+    # `ord` (a chunk's position within its document) is derived from line order; the coarse
+    # doc-level "…-large" chunks are excluded so numbering matches the base chunks.
+    _BASE = ("SELECT id, source, doc_id, title, url, start, \"end\", text, "
+             "row_number() OVER (PARTITION BY source, doc_id ORDER BY start) - 1 AS ord "
+             "FROM _chunks WHERE id NOT LIKE '%-large'")
+
+    def _chunk_rows(self, select_sql: str, params: list) -> list[dict]:
+        """Run `select_sql` (which reads from the `base` CTE) against the Lance chunk dataset."""
+        from .index import chunks_dataset
+        ds = chunks_dataset(self.ws)
+        if ds is None:
+            return []
+        self.con.register("_chunks", ds)
+        try:
+            return self._rows(f"WITH base AS ({self._BASE}) {select_sql}", params)
+        finally:
+            self.con.unregister("_chunks")
+
     def keyword_search(self, query: str, *, k: int = 200, source: str | None = None,
                        doc_like: str | None = None) -> list[dict]:
-        """Deterministic keyword ranking: score = distinct query terms present, + a phrase bonus.
-        No fuzzy vectors — an exact identifier or error string lands its chunk every time."""
+        """Deterministic keyword ranking over the Lance chunks: score = distinct query terms present,
+        + a phrase bonus. No fuzzy vectors — an exact identifier or error string lands every time."""
         import re
         terms = list(dict.fromkeys(re.findall(r"[\w#/.-]{2,}", query.lower())))
         if not terms:
@@ -192,20 +198,21 @@ class Store:
         score = " + ".join(["(CASE WHEN lower(text) LIKE ? THEN 1 ELSE 0 END)"] * len(terms))
         score += " + (CASE WHEN lower(text) LIKE ? THEN 2 ELSE 0 END)"  # whole-phrase bonus
         score_params = [f"%{t}%" for t in terms] + [f"%{query.lower()}%"]
-        sql = (f'SELECT chunk_id AS id, source, doc_id, title, url, ord, start, "end", text, '
-               f"({score}) AS kw_score FROM chunks WHERE {' AND '.join(where)} "
-               f"AND ({score}) > 0 ORDER BY kw_score DESC, doc_id, ord LIMIT ?")
-        return self._rows(sql, score_params + params + score_params + [k])
+        sql = (f'SELECT id, source, doc_id, title, url, ord, start, "end", text, ({score}) AS kw_score '
+               f"FROM base WHERE {' AND '.join(where)} AND ({score}) > 0 "
+               f"ORDER BY kw_score DESC, doc_id, ord LIMIT ?")
+        return self._chunk_rows(sql, score_params + params + score_params + [k])
 
     def chunk_by_id(self, chunk_id: str) -> dict | None:
-        rows = self._rows('SELECT chunk_id AS id, source, doc_id, title, url, ord, start, "end", text '
-                          "FROM chunks WHERE chunk_id=?", [chunk_id])
+        rows = self._chunk_rows(
+            'SELECT id, source, doc_id, title, url, ord, start, "end", text FROM base WHERE id=?',
+            [chunk_id])
         return rows[0] if rows else None
 
     def neighbors(self, source: str, doc_id: str, ord: int, radius: int = 1) -> list[dict]:
-        return self._rows(
-            'SELECT chunk_id AS id, source, doc_id, title, url, ord, start, "end", text '
-            "FROM chunks WHERE source=? AND doc_id=? AND ord BETWEEN ? AND ? ORDER BY ord",
+        return self._chunk_rows(
+            'SELECT id, source, doc_id, title, url, ord, start, "end", text FROM base '
+            "WHERE source=? AND doc_id=? AND ord BETWEEN ? AND ? ORDER BY ord",
             [source, doc_id, ord - radius, ord + radius])
 
     def _meta_filters(self, where: list, params: list, author, since, before) -> None:

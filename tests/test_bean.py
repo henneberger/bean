@@ -465,8 +465,7 @@ with Store(mws) as store:
     store.upsert("gdocs", "big", title="Big", url=None, revision_id=None, body=body)
 reembed(mws, embed_fn=fake_embed)
 with Store(mws) as store:
-    ch = store._rows("SELECT chunk_id AS id, source, doc_id, title, url, ord, start, \"end\", text "
-                     "FROM chunks WHERE doc_id='big' ORDER BY ord", [])
+    ch = store.neighbors("gdocs", "big", 0, 999)  # all base chunks of the doc, ordered by ord
     two = [{**ch[0], "score": 0.9}, {**ch[1], "score": 0.8}]
     merged = _merge_sections(store, two)
     ok(len(merged) == 1, "adjacent same-doc chunks merge into one section")
