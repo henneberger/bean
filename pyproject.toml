@@ -1,7 +1,9 @@
 [project]
 name = "bean"
+# Single source of truth for the version. `.claude-plugin/plugin.json` mirrors it; keep them in
+# lockstep with `python3 scripts/release.py version X.Y.Z` (see RELEASE.md).
 version = "0.1.0"
-description = "Local search over your Google Docs and Slack. No server: your credentials, your machine, Lance + DuckDB under ~/.bean."
+description = "Local hybrid search over your work knowledge, as a Claude Code plugin. No server: your credentials, your machine, Lance + DuckDB under ~/.bean."
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "Apache-2.0" }
@@ -18,6 +20,8 @@ dependencies = [
 # bean provisions it into its venv the first time ocr.backend = "unlimited-ocr" actually runs
 # (see bean/pdf.py:_provision_ocr). This extra just lets you pre-install it if you'd rather.
 ocr = ["transformers>=4.44", "torch>=2.1", "pillow>=10.0"]
+# Release tooling (building the wheel/sdist). `make build` / `scripts/release.py build` use it.
+dev = ["build>=1.0"]
 
 [project.scripts]
 bean = "bean.cli:main"
