@@ -51,7 +51,7 @@ output. All accept `--source {slack|gdocs|github|localfiles}` to scope by connec
 - **`related <ref>`** — documents one hop away in the graph: same repo/project/channel or same
   author, and directly linked docs. Each hit says *why* (`reason`). Use to widen from one doc to its
   neighbourhood ("what else touches this ticket's project?").
-- **`thread <ref>` / `doc <ref>`** — a whole Slack thread / week digest / document as one block,
+- **`thread <ref>` / `doc <ref>`** — a whole Slack thread / document as one block,
   matched by id or title substring. Use when a snippet isn't enough.
 - **`neighbors <chunk-id>`** — the chunks surrounding a specific hit (each hit has an `id`).
 - **`sql "<SELECT …>"`** — drop to **read-only SQL** (SELECT/WITH only) over the workspace's DuckDB:

@@ -1,5 +1,5 @@
 """Microsoft 365 source over Graph — OneDrive/SharePoint FILES, Outlook MAIL (one doc per thread),
-and Teams messages (per-channel per-ISO-week digests, like Slack). Two auth methods, recorded in the
+and Teams messages (one doc per message). Two auth methods, recorded in the
 credential's `method`:
 
   * "device" (default) — device-code public-client flow against the well-known Azure CLI client id;
@@ -10,8 +10,8 @@ credential's `method`:
 Access-token acquisition is injected as `token_fn` so sync() runs fully offline in tests. File bodies
 are downloaded via the item's pre-signed `@microsoft.graph.downloadUrl` and run through the same
 office/pdf/text extractors as localfiles. Change detection: files by eTag/lastModifiedDateTime, mail
-by the newest message's receivedDateTime, Teams digests carry no revision. Files prune; mail threads
-and Teams digests never prune."""
+by the newest message's receivedDateTime, Teams messages carry no revision. Files prune; mail threads
+and Teams messages never prune."""
 
 from __future__ import annotations
 
@@ -23,7 +23,6 @@ import time
 from datetime import datetime, timezone
 from urllib.parse import urlencode
 
-from . import slack  # reuse ISO-week math for the Teams digest buckets
 from ..html import html_to_text
 from ..http import AuthError, api_get, api_json, api_json_post, api_post
 from ..office import OFFICE_EXT, extract_office
@@ -146,7 +145,7 @@ def sync(store: Store, config: dict, *, settings: dict | None = None, fetch=None
     if config.get("teams"):
         changed += _sync_teams(store, config, call, full, now, since_days, log)
 
-    # Only files prune; mail threads and Teams weekly digests never do.
+    # Only files prune; mail threads and Teams messages never do.
     removed = [d for d in store.doc_ids("microsoft")
                if d.startswith("file/") and d not in seen_files]
     for doc_id in removed:
@@ -296,32 +295,37 @@ def _sync_teams(store, config, call, full, now, since_days, log):
             resp = call(url)
             messages += resp.get("value", [])
             url = resp.get("@odata.nextLink")
-        by_week: dict[str, list] = {}
+        # One document per message, so `recent` surfaces individual recent messages.
         for m in messages:
-            ts = _iso_epoch(m.get("createdDateTime"))
-            if ts is None:
+            iso = m.get("createdDateTime")
+            if _iso_epoch(iso) is None:
                 continue
-            by_week.setdefault(slack.iso_week(ts), []).append(m)
-        for week, week_msgs in by_week.items():
-            body = _render_teams_week(name, week, week_msgs)
-            if store.upsert("microsoft", f"{name}/{week}", title=f"{name} — {week}",
-                            url=None, revision_id=None, body=body):
-                changed.append(f"{name}/{week}")
-                log(f"microsoft: updated teams {name} {week}")
-    return changed  # weekly digests never prune
+            rendered = _render_teams_message(m)
+            if not rendered.strip():
+                continue
+            who = (((m.get("from") or {}).get("user") or {}).get("displayName")) or "unknown"
+            doc_id = f"{name}/{m.get('id')}"
+            if store.upsert("microsoft", doc_id, title=f"{name}: {_teams_subject(m)}",
+                            url=m.get("webUrl"), revision_id=None, body=rendered,
+                            meta={"author": who, "created_at": iso, "modified_at": iso}):
+                changed.append(doc_id)
+                log(f"microsoft: updated teams {name} {m.get('id')}")
+    return changed
 
 
-def _render_teams_week(channel: str, week: str, messages: list[dict]) -> str:
-    lines = [f"# {channel} — week {week}", ""]
-    for m in sorted(messages, key=lambda x: x.get("createdDateTime") or ""):
-        who = (((m.get("from") or {}).get("user") or {}).get("displayName")) or "unknown"
-        content = m.get("body") or {}
-        text = html_to_text(content.get("content", "")) if content.get("contentType") == "html" \
-            else content.get("content") or ""
-        if text.strip():
-            lines.append(f"**{who}** ({m.get('createdDateTime', '')}): {text.strip()}")
-    lines.append("")
-    return "\n".join(lines)
+def _teams_text(m: dict) -> str:
+    content = m.get("body") or {}
+    return (html_to_text(content.get("content", "")) if content.get("contentType") == "html"
+            else content.get("content") or "").strip()
+
+
+def _render_teams_message(m: dict) -> str:
+    who = (((m.get("from") or {}).get("user") or {}).get("displayName")) or "unknown"
+    return f"**{who}** ({m.get('createdDateTime', '')}): {_teams_text(m)}"
+
+
+def _teams_subject(m: dict) -> str:
+    return " ".join(_teams_text(m).split())[:80] or "(no text)"
 
 
 def _iso_epoch(iso: str | None) -> float | None:

@@ -1,6 +1,6 @@
 """A lightweight relationship graph, derived — not extracted. bean's connectors already carry the
 structure: a doc's author, and a container encoded in its stable id (a GitHub issue's `owner/repo`,
-a Jira key's `PROJ`, a Slack digest's channel). `implied_edges` turns those into edges at sync time
+a Jira key's `PROJ`, a Slack message's channel). `implied_edges` turns those into edges at sync time
 with zero LLM calls — the portable essence of a knowledge graph's metadata implications. Edges power
 `bean related <doc>` (same repo/project/channel/author) and graph expansion.
 
@@ -21,8 +21,8 @@ def _before(sep: str):
 _CONTAINER: dict = {
     "github": ("in_repo", lambda d: re.split(r"[#:]", d, 1)[0]),      # owner/repo#12 / owner/repo:path
     "jira": ("in_project", lambda d: d.rsplit("-", 1)[0]),           # PROJ-123 -> PROJ
-    "slack": ("in_channel", _before("/")),                           # channel/2026-W01
-    "discord": ("in_channel", _before("/")),
+    "slack": ("in_channel", _before("/")),                           # channel/<ts>
+    "discord": ("in_channel", _before("/")),                         # channel/<message-id>
 }
 
 

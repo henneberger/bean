@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Offline tests: fake HTTP fetch, deterministic bag-of-words embedder, real DuckDB + Lance
 in a temp BEAN_HOME. Covers the store (hash-gated upserts, revisions, cursors), both sources
-(change detection, export fallback, week digests, edits in lookback), the retry policy, the
+(change detection, export fallback, per-thread/message chat docs, edits in lookback), the retry policy, the
 end-to-end sync→search flow, and workspace/credential hygiene."""
 
 from __future__ import annotations
@@ -322,7 +322,6 @@ with Store(cws) as store:
 
 # -- slack sync ---------------------------------------------------------------------------------
 NOW = time.mktime(time.strptime("2026-07-02 12:00", "%Y-%m-%d %H:%M"))
-ok(slack.iso_week(time.mktime(time.strptime("2026-06-29", "%Y-%m-%d"))) == "2026-W27", "2026-06-29 is W27")
 
 
 def ts(days_ago, frac=".000100"):
@@ -361,32 +360,43 @@ def sfetch(url, headers):
     return res(404, {"ok": False, "error": "unknown"})
 
 
+THREAD_ID = f"eng-payments/{ts(1)}"      # one doc per thread, keyed by the root message ts
+SINGLE_ID = f"eng-payments/{ts(2)}"      # one doc per standalone message
 sws = Workspace(repo("slack"))
 scfg = {"channels": ["#eng-payments"], "lookback_days": 14}
 with Store(sws) as store:
     s1 = slack.sync(store, scfg, token="xoxp-1", team_url="https://t.slack.com", fetch=sfetch, now=NOW)
-    ok(s1["changed"] == ["eng-payments/2026-W27"], f"first sync writes the week digest ({s1['changed']})")
-    body = store.get("slack", "eng-payments/2026-W27").body
-    ok(f"## thread {ts(1)}" in body, "thread renders as its own section")
-    ok("@ada" in body and "Retries land @bob, see the doc (https://x.test)" in body, "mentions and links resolve")
-    ok("## messages" in body and "Deploy done" in body, "non-thread messages render")
+    ok(s1["changed"] == [THREAD_ID, SINGLE_ID], f"first sync writes one doc per thread/message ({s1['changed']})")
+    tbody = store.get("slack", THREAD_ID).body
+    ok("@ada" in tbody and "Retries land @bob, see the doc (https://x.test)" in tbody, "mentions and links resolve")
+    ok("Confirmed" in tbody, "the thread's reply is in the thread doc")
+    ok("Deploy done" in store.get("slack", SINGLE_ID).body, "a standalone message is its own doc")
+    ok(str(store.get("slack", THREAD_ID).modified_at).startswith("2026-07-01"), "thread modified_at is its latest reply")
     s2 = slack.sync(store, scfg, token="xoxp-1", team_url="https://t.slack.com", fetch=sfetch, now=NOW)
     ok(s2["changed"] == [], "unchanged history is a no-op")
-    ok(store.get_state("slack.cursor.C1") == float(ts(1)), "cursor advanced to latest ts")
-    # Lookback is not re-applied per sync: the second sync's floor is the cursor's week start, not
-    # a rolling now-minus-14-days window (which would reach back to W25).
-    ok(seen_oldest["v"] == slack.week_start(float(ts(1))), "later syncs floor at the cursor's week, not a rolling lookback")
+    ok(store.get_state("slack.cursor.C1") == float(ts(1, ".000200")), "cursor advanced to the latest activity")
+    # Later syncs re-scan a trailing REFRESH_DAYS window so recent edits/replies re-render.
+    ok(seen_oldest["v"] == NOW - slack.REFRESH_DAYS * 86400, "later syncs floor at the refresh window")
     HISTORY[1]["text"] = "Deploy done (edited: rolled back)"
     s3 = slack.sync(store, scfg, token="xoxp-1", team_url="https://t.slack.com", fetch=sfetch, now=NOW)
-    ok(s3["changed"] == ["eng-payments/2026-W27"], "edit inside the current week rewrites the week")
-    ok("rolled back" in store.get("slack", "eng-payments/2026-W27").body, "edited text landed")
+    ok(s3["changed"] == [SINGLE_ID], "an edit within the window rewrites just that message's doc")
+    ok("rolled back" in store.get("slack", SINGLE_ID).body, "edited text landed")
 
 # all-channels mode: no explicit channel list → sync every channel the account is a member of
 aws = Workspace(repo("slack-all"))
 with Store(aws) as store:
     sa = slack.sync(store, {"channels": []}, token="xoxp-1", team_url="https://t.slack.com", fetch=sfetch, now=NOW)
-    ok(sa["changed"] == ["eng-payments/2026-W27"], f"empty channel list syncs all member channels ({sa['changed']})")
-    ok(store.get("slack", "random-not-joined/2026-W27") is None, "non-member channels are skipped")
+    ok(sa["changed"] == [THREAD_ID, SINGLE_ID], f"empty channel list syncs all member channels ({sa['changed']})")
+    ok(not any(d.startswith("random-not-joined/") for d in store.doc_ids("slack")), "non-member channels are skipped")
+
+# legacy migration: pre-existing per-ISO-week digest docs are pruned on sync
+mws = Workspace(repo("slack-legacy"))
+with Store(mws) as store:
+    store.upsert("slack", "eng-payments/2026-W27", title="#eng-payments — 2026-W27", url=None,
+                 revision_id=None, body="old digest")
+    ml = slack.sync(store, scfg, token="xoxp-1", team_url="https://t.slack.com", fetch=sfetch, now=NOW)
+    ok("eng-payments/2026-W27" in ml["removed"], f"legacy week digest is reported removed ({ml['removed']})")
+    ok(store.get("slack", "eng-payments/2026-W27") is None, "legacy week digest row is deleted")
 
 # -- end to end: sync → embed → lance → search --------------------------------------------------
 ews = Workspace(repo("e2e"))
@@ -920,7 +930,6 @@ def t_discord():
     save_credential("discord", {"token": "t"})
     mts = NOW - 2 * 86400
     iso = _dt.datetime.fromtimestamp(mts, tz=_dt.timezone.utc).isoformat()
-    week = slack.iso_week(mts)
     def f(u, h, method="GET", body=None):
         if "/channels/999/messages" in u:
             if "before=" in u:
@@ -932,8 +941,11 @@ def t_discord():
         return res(404, {})
     with _store("discord") as s:
         r = discord.sync(s, {"channels": ["999"]}, settings={}, fetch=f, now=NOW)
-        ok(r["changed"] == [f"general/{week}"], f"discord week digest ({r})")
-        ok("hello team" in s.get("discord", f"general/{week}").body, "discord message rendered")
+        ok(r["changed"] == ["general/1000"], f"discord one doc per message ({r})")
+        doc = s.get("discord", "general/1000")
+        ok("hello team" in doc.body, "discord message rendered")
+        ok(str(doc.modified_at).startswith(iso[:10]), "discord message carries its timestamp")
+        ok("hello team" in doc.title, "discord message title is its text")
 
 
 def t_microsoft():

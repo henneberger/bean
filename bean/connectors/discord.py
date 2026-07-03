@@ -1,10 +1,8 @@
 """Discord source. Auth is a bot token (`Authorization: Bot <token>`); the bot must be a member
-of the guilds/channels you track. Like Slack, the message stream is cut into per-channel per-ISO-week
-digest documents (`<channel_name>/<YYYY-Www>`) so units stay stable as history grows. Each channel
-is paginated backwards by message-id snowflake down to a floor: the initial backfill (`lookback_days`,
-default 14) on the first sync, then the per-channel cursor after that (snapped to the ISO-week start
-so digests re-render from complete weeks); `--rebuild` reaches back `since_days`. Reuses slack's
-ISO-week math. Weekly digests never prune."""
+of the guilds/channels you track. Each message becomes its own document (`<channel_name>/<id>`),
+so `recent` returns actual recent messages, newest first. Each channel is paginated backwards by
+message-id snowflake down to a floor: the initial backfill (`lookback_days`, default 14) on the
+first sync, then the per-channel cursor after that; `--rebuild` reaches back `since_days`."""
 
 from __future__ import annotations
 
@@ -12,7 +10,6 @@ import re
 import time
 from datetime import datetime, timezone
 
-from . import slack  # reuse iso_week / week_start so chat sources bucket weeks identically
 from ..http import api_json
 from ..store import Store
 from ..workspace import load_credential, save_credential
@@ -22,6 +19,7 @@ DAY = 86400
 # Text channel kinds we index: GUILD_TEXT(0), GUILD_ANNOUNCEMENT(5), threads(10,11,12).
 TEXT_TYPES = {0, 5, 10, 11, 12}
 _URL_RE = re.compile(r"discord\.com/channels/(\d+)/(\d+)")
+_LEGACY_WEEK = re.compile(r"/\d{4}-W\d{2}$")  # old per-ISO-week digest ids, pruned on sight
 
 
 # -- refs + auth --------------------------------------------------------------------------------
@@ -76,23 +74,24 @@ def _stamp(ts: float) -> str:
     return datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y-%m-%d %H:%M")
 
 
-def _render_message(m: dict) -> str:
+def _who(m: dict) -> str:
     author = m.get("author") or {}
-    who = author.get("global_name") or author.get("username") or "unknown"
+    return author.get("global_name") or author.get("username") or "unknown"
+
+
+def _text(m: dict) -> str:
     text = str(m.get("content") or "")
     for att in m.get("attachments") or []:
         text += f"\n[attachment: {att.get('filename', '')}]"
-    return f"**@{who}** ({_stamp(_msg_ts(m))}): {text}".rstrip()
+    return text.strip()
 
 
-def render_week(channel: str, week: str, messages: list[dict]) -> str:
-    lines = [f"# #{channel} — week {week}", ""]
-    for m in sorted(messages, key=_msg_ts):
-        rendered = _render_message(m)
-        if rendered.strip():
-            lines.append(rendered)
-    lines.append("")
-    return "\n".join(lines)
+def _render_message(m: dict) -> str:
+    return f"**@{_who(m)}** ({_stamp(_msg_ts(m))}): {_text(m)}".rstrip()
+
+
+def _subject(m: dict) -> str:
+    return " ".join(_text(m).split())[:80] or "(no text)"
 
 
 # -- sync ---------------------------------------------------------------------------------------
@@ -123,32 +122,41 @@ def sync(store: Store, config: dict, *, settings: dict | None = None, fetch=None
         except RuntimeError as err:
             log(f"discord: guild {gid} skipped ({err})")
 
+    # Migration / cleanup: drop any lingering per-ISO-week digest documents from the old model.
+    # Delete the row here; run_sync clears the matching Lance vectors from the `removed` list.
+    removed = [d for d in store.doc_ids("discord") if _LEGACY_WEEK.search(d)]
+    for doc_id in removed:
+        store.delete("discord", doc_id)
     changed = []
     for cid, name in channels.items():
         cursor = store.get_state(f"discord.cursor.{cid}", 0)
         # Lookback is the initial backfill (first sync only); after that continue from the cursor.
-        # `--rebuild` ignores the cursor and reaches back since_days. (Shares Slack's window semantics.)
+        # `--rebuild` ignores the cursor and reaches back since_days.
         if full:
             floor = now - since_days * DAY
         elif cursor:
             floor = cursor
         else:
             floor = now - lookback * DAY
-        floor = slack.week_start(floor)
         messages = _fetch_messages(cid, headers, fetch, floor, log)
         if not messages:
             continue
-        by_week: dict[str, list] = {}
+        # One document per message, so `recent` surfaces individual recent messages.
         for m in messages:
-            by_week.setdefault(slack.iso_week(_msg_ts(m)), []).append(m)
-        for week, week_msgs in by_week.items():
-            body = render_week(name, week, week_msgs)
-            if store.upsert("discord", f"{name}/{week}", title=f"#{name} — {week}",
-                            url=f"https://discord.com/channels/@me/{cid}", revision_id=None, body=body):
-                changed.append(f"{name}/{week}")
-                log(f"discord: updated #{name} {week}")
+            rendered = _render_message(m)
+            if not rendered.strip():
+                continue
+            ts = _msg_ts(m)
+            iso = datetime.fromtimestamp(ts, tz=timezone.utc).isoformat()
+            doc_id = f"{name}/{m['id']}"
+            if store.upsert("discord", doc_id, title=f"#{name}: {_subject(m)}",
+                            url=f"https://discord.com/channels/@me/{cid}/{m['id']}",
+                            revision_id=None, body=rendered,
+                            meta={"author": _who(m), "created_at": iso, "modified_at": iso}):
+                changed.append(doc_id)
+                log(f"discord: updated #{name} {m['id']}")
         store.set_state(f"discord.cursor.{cid}", max([cursor] + [_msg_ts(m) for m in messages]))
-    return {"changed": changed, "removed": []}  # weekly digests never prune
+    return {"changed": changed, "removed": removed}
 
 
 def _fetch_messages(cid, headers, fetch, floor, log) -> list[dict]:

@@ -15,7 +15,7 @@ as worked examples you can read or copy. Your job: write the module, test it off
 | REST list + item + comments | `bean/connectors/jira.py`, `bean/connectors/zendesk.py` | issues/tickets → one doc each |
 | Wiki / KB (HTML bodies) | `bean/connectors/confluence.py`, `bean/connectors/hubspot.py` | `html_to_text` the body |
 | Whole-collection (index everything) | `bean/connectors/salesforce.py`, `bean/connectors/hubspot.py` | `always_when_connected`, never prune |
-| Chat (per-week digests) | `bean/connectors/discord.py`, `bean/connectors/slack.py` | reuse `bean.connectors.slack.iso_week` / `week_start` |
+| Chat (per-message / per-thread docs) | `bean/connectors/discord.py`, `bean/connectors/slack.py` | one doc per message (Discord) or per thread (Slack); cursor + lookback window |
 | Files (office/pdf) | `bean/connectors/gdocs.py`, `bean/connectors/localfiles.py` | temp-file → `extract_office`/`extract_pdf` |
 | CLI/OAuth-minted token | `bean/connectors/microsoft.py`, `bean/connectors/gdocs.py` | injectable `token_fn=` for offline tests |
 | No-auth fetch | `bean/connectors/localfiles.py` | `auth=None`, no `connect` |
@@ -60,7 +60,6 @@ from bean.workspace import load_credential, save_credential
 from bean.html import html_to_text, extract_readable      # HTML bodies / full web pages
 from bean.office import extract_office, OFFICE_EXT         # .docx/.odt/.rtf (needs a Path)
 from bean.pdf import extract_pdf                           # PDF (needs a path)
-from bean.connectors import slack                          # slack.iso_week / week_start for chat
 from bean.sources import Source
 ```
 

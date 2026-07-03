@@ -234,7 +234,7 @@ def _as_hits(rows: list[dict]) -> list[dict]:
         h = {"id": r.get("id") or f"{r['source']}/{r['doc_id']}", "source": r["source"],
              "doc_id": r["doc_id"], "title": r.get("title"), "url": r.get("url") or None,
              "text": r.get("text") or r.get("body", ""), "score": None}
-        for key in ("created_at", "modified_at", "author", "mime", "reason"):
+        for key in ("created_at", "modified_at", "fetched_at", "author", "mime", "reason"):
             if r.get(key) is not None:
                 h[key] = str(r[key]) if "_at" in key else r[key]
         hits.append(h)
@@ -255,7 +255,7 @@ def document(ws, doc_like: str, *, source: str | None = None) -> list[dict]:
 
 
 def thread(ws, doc_like: str, *, source: str | None = None) -> list[dict]:
-    """A whole thread/document as one block — Slack week digests and docs alike."""
+    """A whole thread/document as one block — Slack threads and docs alike."""
     return document(ws, doc_like, source=source)
 
 
@@ -285,8 +285,12 @@ def _as_list(wss) -> list:
 
 def _dedup(hits: list[dict], k: int | None, *, by_recency: bool = False) -> list[dict]:
     if by_recency:
-        hits = sorted(hits, key=lambda h: (h.get("modified_at") is None, h.get("modified_at")),
-                      reverse=True)
+        # Mirror the store's `COALESCE(modified_at, fetched_at) DESC`: fall back to fetch time so
+        # sources that leave modified_at NULL still order by when bean last saw them, not arbitrarily.
+        def _recency(h):
+            ts = h.get("modified_at") or h.get("fetched_at")
+            return (ts is None, ts or "")
+        hits = sorted(hits, key=_recency, reverse=True)
     else:
         hits = sorted(hits, key=lambda h: (h.get("score") is None, -(h.get("score") or 0.0)))
     seen, out = set(), []

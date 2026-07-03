@@ -105,11 +105,11 @@ DEFAULTS: dict = {
     "slack": {
         "lookback_days": 14,  # first sync backfills this many days; later syncs continue from the cursor
         # Chat is short and bursty — smaller windows than the global default keep a hit tight to the
-        # message that matched instead of dragging in a whole week digest. Overrides `chunking` above.
+        # message that matched instead of dragging in a whole thread. Overrides `chunking` above.
         "chunking": {"lines": 15, "overlap": 3, "max_chars": 1000, "min_chars": 20},
     },
     "discord": {
-        "lookback_days": 14,  # same initial backfill as Slack (shares the ISO-week digest math)
+        "lookback_days": 14,  # same initial backfill as Slack (first sync only, then the cursor)
     },
     "gdocs": {
         # With no doc/folder explicitly added, bean auto-indexes the Google Docs + PDFs you own.

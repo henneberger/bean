@@ -1,7 +1,7 @@
 """DuckDB catalog for a workspace: document snapshots, revision history, sync cursors, and the
 relationship-edge graph.
 
-Documents are the unit of sync — one row per Google Doc, one per Slack channel-week digest. The
+Documents are the unit of sync — one row per Google Doc, one per Slack thread or message. The
 body lives here; the content hash is the change authority (a revision bump whose text is identical
 updates metadata but re-embeds nothing). Chunks live once in Lance (text + vectors); the keyword /
 neighbour / merge queries here run as DuckDB SQL directly over that Lance dataset (register it on the

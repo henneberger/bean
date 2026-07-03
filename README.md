@@ -55,7 +55,7 @@ bean ships **10 core connectors**, always on:
 
 | Source | Auth | What it indexes |
 |--------|------|-----------------|
-| **Slack** | user token (`xoxp-…`) | channels, cut into per-week digests with threads as sections |
+| **Slack** | user token (`xoxp-…`) | channels — one document per thread, one per standalone message |
 | **Google Drive** | gcloud sign-in | Docs, PDFs (extracted), and comments (each comment its own author-attributed entry); whole Drive folders |
 | **GitHub** | personal access token | issues and pull requests (body + comments) |
 | **Confluence** | Cloud (email + API token) or Server/DC (PAT) | space pages (storage HTML → text) |
@@ -63,8 +63,8 @@ bean ships **10 core connectors**, always on:
 | **Zendesk** | subdomain + email + API token | tickets + help-center articles |
 | **Salesforce** | OAuth token + instance URL | Knowledge articles + Cases |
 | **HubSpot** | private-app token | tickets, notes, and knowledge-base articles |
-| **Microsoft 365** | device-code or `az` CLI | OneDrive/SharePoint files, Outlook threads, Teams week-digests |
-| **Discord** | bot token | channels, cut into per-week digests like Slack |
+| **Microsoft 365** | device-code or `az` CLI | OneDrive/SharePoint files, Outlook threads, Teams messages (one doc each) |
+| **Discord** | bot token | channels — one document per message |
 | **Local files** | none | a folder (crawled recursively) or file — Markdown/text, office docs (**Word**, OpenDocument, RTF, **PowerPoint**, **Excel**), **HTML**, and **PDF** |
 
 Where a service offers more than one way in, bean supports both. It prefers the path an individual
@@ -155,7 +155,7 @@ configured.
 | `sync.stale_days` | `7` | warn (never auto-sync) when the index is older than this; 0 = off |
 | `ocr.backend` / `model` / `dpi` | `auto` / `baidu/Unlimited-OCR` / `200` | PDF text backend (below) |
 | `slack.lookback_days` | `14` | initial backfill: how far the **first** Slack sync reaches back; later syncs continue from the cursor |
-| `discord.lookback_days` | `14` | initial backfill for Discord channel digests (first sync only) |
+| `discord.lookback_days` | `14` | initial backfill for Discord channels (first sync only) |
 | `gdocs.lookback_days` | `30` | initial backfill for auto-indexed Drive files; later syncs discover only files changed since (cursor). 0 = all |
 
 **Per-source chunking.** Any `chunking.*` leaf can be overridden per source as `<source>.chunking.*`
