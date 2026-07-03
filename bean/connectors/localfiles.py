@@ -1,9 +1,9 @@
-"""Local files source. Point bean at a folder (crawled recursively) or a single file and it
-indexes Markdown, plain text, office docs (Word .docx/.docm, OpenDocument .odt, RTF), and PDF
-(PDF via the OCR pipeline). No auth — it reads your disk. Change detection is per-file mtime
-(skipped when unchanged) with the content hash as the final authority, so a re-sync only re-embeds
-files you actually edited. doc_id is the absolute path; files that disappear are pruned from the
-index."""
+"""Local files source. Point bean at a folder (crawled recursively) or a single file and it indexes
+documents: Markdown/plain text, Word (.docx/.docm), OpenDocument (.odt), RTF, PowerPoint (.pptx),
+Excel (.xlsx), HTML, and PDF (via the OCR-capable extractor). No auth — it reads your disk. Change
+detection is per-file mtime (skipped when unchanged) with the content hash as the final authority, so
+a re-sync only re-embeds files you actually edited. doc_id is the absolute path; files that disappear
+are pruned from the index."""
 
 from __future__ import annotations
 
@@ -16,8 +16,9 @@ from ..office import OFFICE_EXT
 # formats. Deliberately excludes logs and source code — this source is for documents.
 TEXT_EXT = {".md", ".markdown", ".mdown", ".mkd", ".mkdn", ".mdx", ".txt", ".text",
             ".rst", ".org", ".adoc", ".asciidoc", ".asc", ".textile", ".tex", ".me"}
+HTML_EXT = {".html", ".htm", ".xhtml"}
 PDF_EXT = {".pdf"}
-SUPPORTED = TEXT_EXT | OFFICE_EXT | PDF_EXT
+SUPPORTED = TEXT_EXT | OFFICE_EXT | PDF_EXT | HTML_EXT
 
 
 def parse_add(item: str):
@@ -57,6 +58,13 @@ def _read(path: Path, ocr_cfg: dict, log) -> str | None:
         try:
             return extract_office(path)
         except Exception as err:  # a malformed/encrypted doc must not abort the whole sync
+            log(f"localfiles: {path.name} skipped ({err})")
+            return None
+    if ext in HTML_EXT:
+        from ..html import html_to_text
+        try:
+            return html_to_text(path.read_text(errors="replace"))
+        except Exception as err:
             log(f"localfiles: {path.name} skipped ({err})")
             return None
     try:

@@ -496,10 +496,24 @@ with _zip.ZipFile(nested / "report.docx", "w") as zf:
 ok(office.extract_office(nested / "report.docx") == "Chargebacks go through disputeCard.\nSecond paragraph.",
    "docx runs join within a paragraph, paragraphs split by newline")
 ok(office._rtf(r"{\rtf1\ansi Hello\par world\'21}") == "Hello\nworld!", "rtf control words stripped, escapes decoded")
+# .xlsx (openpyxl) + .pptx (python-pptx) via libraries; .html via the stdlib flattener
+from openpyxl import Workbook as _WB  # noqa: E402
+_wb = _WB(); _sh = _wb.active; _sh.title = "Q3"; _sh.append(["Region", "Revenue"]); _sh.append(["West", 42000])
+_wb.save(nested / "numbers.xlsx")
+ok("Region\tRevenue" in office.extract_office(nested / "numbers.xlsx")
+   and "42000" in office.extract_office(nested / "numbers.xlsx"), "xlsx sheet rows extracted")
+from pptx import Presentation as _PP  # noqa: E402
+_pp = _PP(); _pp.slides.add_slide(_pp.slide_layouts[5]).shapes.title.text = "Launch Plan"
+_pp.save(nested / "deck.pptx")
+ok("Launch Plan" in office.extract_office(nested / "deck.pptx"), "pptx slide text extracted")
+(nested / "guide.html").write_text("<h1>Runbook</h1><p>Restart the <b>worker</b>.</p>")
 lws2 = Workspace(repo("local-office"))
 r4 = localfiles.sync(store_office := Store(lws2), {"paths": [str(docs_dir)]}, settings=lset)
 ok(str(nested / "report.docx") in r4["changed"], "nested .docx discovered by recursive crawl")
 ok("disputeCard" in store_office.get("localfiles", str(nested / "report.docx")).body, "docx body indexed")
+ok("42000" in store_office.get("localfiles", str(nested / "numbers.xlsx")).body, "xlsx indexed by localfiles")
+ok("Launch Plan" in store_office.get("localfiles", str(nested / "deck.pptx")).body, "pptx indexed by localfiles")
+ok("Restart the worker." in store_office.get("localfiles", str(nested / "guide.html")).body, "html flattened + indexed")
 store_office.close()
 
 # -- pdf backend routing (fakes, no models) -----------------------------------------------------

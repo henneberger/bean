@@ -1,12 +1,12 @@
-"""Text extraction for office "docs" — Word (.docx/.docm) and OpenDocument (.odt/.fodt), plus a
-best-effort RTF stripper. All stdlib: modern office files are just zipped XML, so bean reads them
-directly with `zipfile` + `xml.etree` and owns no extra toolchain (unlike the PDF OCR path). Each
-extractor returns plain text with paragraph breaks preserved, or raises so the caller can log-skip
-a single unreadable file without aborting the whole sync.
+"""Text extraction for office "docs". Word (.docx/.docm), OpenDocument (.odt/.fodt) and RTF are
+read with stdlib alone (they're just zipped XML). Presentations (.pptx) and spreadsheets (.xlsx)
+go through purpose-built libraries — python-pptx and openpyxl — because reassembling slide/cell
+structure by hand is fragile; both are lazy-imported so they only matter when such a file appears.
+Each extractor returns plain text with structure (paragraphs, slides, sheets) preserved, or raises
+so the caller can log-skip one unreadable file without aborting the whole sync.
 
-Legacy binary formats (.doc, .ppt) are intentionally not handled here — they need an external
-converter (antiword/LibreOffice), which would break the "no manual install" promise; the caller
-skips them with a clear message."""
+Legacy binary formats (.doc, .ppt) are intentionally not handled — they need an external converter
+(antiword/LibreOffice); the caller skips them with a clear message."""
 
 from __future__ import annotations
 
@@ -16,7 +16,9 @@ from pathlib import Path
 DOCX_EXT = {".docx", ".docm"}
 ODT_EXT = {".odt", ".fodt"}
 RTF_EXT = {".rtf"}
-OFFICE_EXT = DOCX_EXT | ODT_EXT | RTF_EXT
+PPTX_EXT = {".pptx"}
+XLSX_EXT = {".xlsx"}
+OFFICE_EXT = DOCX_EXT | ODT_EXT | RTF_EXT | PPTX_EXT | XLSX_EXT
 
 # OOXML / ODF namespaces we pull text out of.
 _W = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
@@ -31,7 +33,57 @@ def extract_office(path: Path) -> str:
         return _odt(path)
     if ext in RTF_EXT:
         return _rtf(path.read_bytes().decode("latin-1", errors="replace"))
+    if ext in PPTX_EXT:
+        return _pptx(path)
+    if ext in XLSX_EXT:
+        return _xlsx(path)
     raise ValueError(f"unsupported office extension: {ext}")
+
+
+def _pptx(path: Path) -> str:
+    """PowerPoint .pptx: text from every shape (and table) per slide, plus speaker notes, kept in
+    slide order with a heading per slide so a chunk still says which slide it came from."""
+    try:
+        from pptx import Presentation
+    except ImportError as err:
+        raise RuntimeError("reading .pptx needs `pip install python-pptx`") from err
+    out = []
+    for i, slide in enumerate(Presentation(str(path)).slides, 1):
+        parts = []
+        for shape in slide.shapes:
+            if shape.has_text_frame and shape.text_frame.text.strip():
+                parts.append(shape.text_frame.text)
+            if shape.has_table:
+                for row in shape.table.rows:
+                    parts.append("\t".join(c.text for c in row.cells))
+        if slide.has_notes_slide and slide.notes_slide.notes_text_frame.text.strip():
+            parts.append(f"(notes) {slide.notes_slide.notes_text_frame.text}")
+        body = "\n".join(p for p in parts if p and p.strip())
+        out.append(f"## Slide {i}\n{body}" if body else f"## Slide {i}")
+    return "\n\n".join(out).strip()
+
+
+def _xlsx(path: Path) -> str:
+    """Excel .xlsx: each sheet's non-empty rows as tab-joined cells, computed values (not formulas),
+    under a heading per sheet. read_only streaming so a large workbook doesn't load fully into RAM."""
+    try:
+        from openpyxl import load_workbook
+    except ImportError as err:
+        raise RuntimeError("reading .xlsx needs `pip install openpyxl`") from err
+    wb = load_workbook(str(path), read_only=True, data_only=True)
+    try:
+        out = []
+        for sheet in wb.worksheets:
+            rows = []
+            for row in sheet.iter_rows(values_only=True):
+                cells = [str(c) for c in row if c is not None and str(c).strip()]
+                if cells:
+                    rows.append("\t".join(cells))
+            if rows:
+                out.append(f"## {sheet.title}\n" + "\n".join(rows))
+        return "\n\n".join(out).strip()
+    finally:
+        wb.close()
 
 
 def _docx(path: Path) -> str:
