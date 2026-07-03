@@ -73,7 +73,6 @@ can set up without an admin (Atlassian Cloud tokens or Server PATs; Microsoft de
 into `~/.bean/plugins/`, live with no core edits. [`docs/authoring-connectors.md`](docs/authoring-connectors.md)
 walks Claude through the contract, helpers, a test recipe, and a template; the 12 core connectors in
 [`bean/`](bean/) are worked examples across every API shape. `bean plugins list` shows what's loaded.
-See also [docs/connectors.md](docs/connectors.md).
 
 ### Global vs local scope
 

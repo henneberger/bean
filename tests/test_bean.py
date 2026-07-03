@@ -151,6 +151,9 @@ def gfetch(url, headers):
     u = urlparse(url)
     if u.path == "/drive/v3/files":
         return res(200, {"files": [{"id": "docB"}]})
+    cm = re.match(r"^/drive/v3/files/([^/]+)/comments$", u.path)
+    if cm:
+        return res(200, DOCS.get(cm.group(1), {}).get("comments") or {"comments": []})
     m = re.match(r"^/drive/v3/files/([^/]+)(/export)?$", u.path)
     d = DOCS[m.group(1)]
     qs = parse_qs(u.query)
@@ -237,6 +240,8 @@ seen_q = {}
 def afetch(url, headers):
     from urllib.parse import urlparse, parse_qs
     u = urlparse(url)
+    if u.path.endswith("/comments"):
+        return res(200, {"comments": []})
     if u.path == "/drive/v3/files":
         seen_q["q"] = parse_qs(u.query).get("q", [""])[0]
         return res(200, {"files": [{"id": "m1"}, {"id": "m2"}]})
@@ -270,6 +275,50 @@ with Store(aws) as store:
 
     sb = gdocs.sync(store, {}, token_fn=lambda force=False: "tok", fetch=afetch2, lookback_days=30)
     ok(sb["removed"] == [] and store.get("gdocs", "m2") is not None, "doc aged out of window is retained")
+
+# -- gdocs comments: each comment is its own author-attributed, timestamped doc ------------------
+def cfetch(url, headers):
+    from urllib.parse import urlparse
+    u = urlparse(url)
+    if u.path.endswith("/comments"):
+        return res(200, {"comments": [
+            {"id": "c1", "content": "please clarify the refund window",
+             "author": {"displayName": "Eric Idle"}, "createdTime": "2026-06-01T00:00:00Z",
+             "modifiedTime": "2026-06-02T00:00:00Z",
+             "quotedFileContent": {"value": "refunds are processed"},
+             "replies": [{"author": {"displayName": "You"}, "content": "within 30 days",
+                          "createdTime": "2026-06-02T00:00:00Z"}]}]})
+    if u.path.endswith("/export"):
+        return res(200, "# Refund Policy\n\nRefunds are processed within the window.")
+    return res(200, {"id": "docC", "name": "Refund Policy", "headRevisionId": "r1", "trashed": False,
+                     "webViewLink": "https://docs.google.com/document/d/docC",
+                     "modifiedTime": "2026-05-01T00:00:00Z",
+                     "mimeType": "application/vnd.google-apps.document",
+                     "lastModifyingUser": {"displayName": "Grace Hopper"}})
+
+cdoc = "docC#comment:c1"
+cws = Workspace(repo("gdocs-comments"))
+with Store(cws) as store:
+    rc = gdocs.sync(store, {"docs": ["docC"], "folders": []}, token_fn=lambda force=False: "tok", fetch=cfetch)
+    ok(cdoc in rc["changed"], "comment indexed as its own doc")
+    c = store.get("gdocs", cdoc)
+    ok(c and c.author == "Eric Idle", "comment carries its own author")
+    ok(str(c.modified_at).startswith("2026-06-02"), "comment carries its last-activity time")
+    ok("refund window" in c.body and "within 30 days" in c.body, "comment body includes content + replies")
+    ok("Refund Policy" in c.title and "Eric Idle" in c.title, "comment title names author + parent doc")
+    # the user story: "show me eric's most recent comment on my doc"
+    hits = recent(cws, source="gdocs", author="eric", doc_like="Refund")
+    ok(hits and hits[0]["doc_id"] == cdoc, "recent --author eric --doc Refund surfaces eric's comment")
+    rc2 = gdocs.sync(store, {"docs": ["docC"], "folders": []}, token_fn=lambda force=False: "tok", fetch=cfetch)
+    ok(cdoc not in rc2["changed"], "unchanged comment re-syncs as a no-op")
+
+    def cfetch_gone(url, headers):
+        from urllib.parse import urlparse
+        if urlparse(url).path.endswith("/comments"):
+            return res(200, {"comments": []})
+        return cfetch(url, headers)
+    rc3 = gdocs.sync(store, {"docs": ["docC"], "folders": []}, token_fn=lambda force=False: "tok", fetch=cfetch_gone)
+    ok(cdoc in rc3["removed"] and store.get("gdocs", cdoc) is None, "a deleted comment is pruned")
 
 # -- slack sync ---------------------------------------------------------------------------------
 NOW = time.mktime(time.strptime("2026-07-02 12:00", "%Y-%m-%d %H:%M"))

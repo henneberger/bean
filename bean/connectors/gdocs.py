@@ -28,6 +28,12 @@ INDEXABLE_MIME = ("(mimeType='application/vnd.google-apps.document' "
                   f"or mimeType='{PDF_MIME}') and trashed=false")
 DOC_FIELDS = ("id,name,createdTime,modifiedTime,headRevisionId,webViewLink,trashed,mimeType,"
               "lastModifyingUser(displayName,emailAddress),owners(displayName,emailAddress)")
+# Each comment (and its replies) is indexed as its own tiny document keyed <fileId>#comment:<id>,
+# so it carries its own author + timestamp — that's what makes "eric's most recent comment on my
+# doc" answerable via `recent --author eric --doc "<title>"`.
+COMMENT_FIELDS = ("comments(id,resolved,createdTime,modifiedTime,content,"
+                  "author(displayName,emailAddress),quotedFileContent(value),"
+                  "replies(createdTime,content,author(displayName,emailAddress)))")
 
 
 # -- refs ---------------------------------------------------------------------------------------
@@ -113,7 +119,7 @@ def _crawl(call, q: str) -> list[str]:
 
 def sync(store: Store, config: dict, *, token_fn=access_token, fetch=None,
          full: bool = False, lookback_days: int = 30, ocr: dict | None = None,
-         extract=extract_pdf, log=lambda m: None) -> dict:
+         comments: bool = True, extract=extract_pdf, log=lambda m: None) -> dict:
     token = token_fn()
     ocr = ocr or {}
 
@@ -168,6 +174,11 @@ def sync(store: Store, config: dict, *, token_fn=access_token, fetch=None,
         mt = meta.get("modifiedTime")
         if auto and mt and (newest_mod is None or mt > newest_mod):
             newest_mod = mt  # advance the discovery cursor to the newest file we've seen
+        # Comments live outside the file's headRevisionId, so pull them every sync (a new comment
+        # doesn't bump the doc's revision). Each becomes its own author-attributed, timestamped doc.
+        if comments:
+            seen += _sync_comments(store, call, doc_id, meta.get("name", doc_id),
+                                   meta.get("webViewLink"), changed, log)
         existing = store.get("gdocs", doc_id)
         if not full and existing and existing.revision_id and existing.revision_id == meta.get("headRevisionId"):
             continue
@@ -194,6 +205,64 @@ def sync(store: Store, config: dict, *, token_fn=access_token, fetch=None,
     for doc_id in removed:
         store.delete("gdocs", doc_id)
     return {"changed": changed, "removed": removed}
+
+
+def _person(a: dict | None) -> str:
+    a = a or {}
+    return a.get("displayName") or a.get("emailAddress") or "Unknown"
+
+
+def _comments(call, doc_id: str) -> list[dict]:
+    """Every (non-deleted) comment thread on a Drive file, paged."""
+    out: list[dict] = []
+    page = None
+    while True:
+        params = urlencode({"fields": f"nextPageToken,{COMMENT_FIELDS}", "pageSize": "100",
+                            "includeDeleted": "false", **({"pageToken": page} if page else {})})
+        try:
+            resp = call(f"/files/{doc_id}/comments?{params}")
+        except RuntimeError:
+            return out  # a file type that doesn't support comments (or a transient error) — skip
+        out += resp.get("comments", [])
+        page = resp.get("nextPageToken")
+        if not page:
+            break
+    return out
+
+
+def _comment_body(c: dict, parent_title: str) -> str:
+    parts = [f'Comment on "{parent_title}"']
+    quoted = (c.get("quotedFileContent") or {}).get("value")
+    if quoted:
+        parts.append(f"> {quoted}")
+    parts.append(f'{_person(c.get("author"))}: {c.get("content", "")}')
+    for r in c.get("replies") or []:
+        parts.append(f'{_person(r.get("author"))} replied: {r.get("content", "")}')
+    if c.get("resolved"):
+        parts.append("(resolved)")
+    return "\n".join(parts)
+
+
+def _sync_comments(store, call, parent_id: str, parent_title: str, url, changed: list, log) -> list[str]:
+    """Upsert each comment on `parent_id` as its own doc (`<parent>#comment:<id>`) carrying the
+    comment's author + last-activity time. Returns every comment doc_id seen so the caller keeps
+    them out of the prune set; deleted comments simply stop appearing and get pruned."""
+    seen: list[str] = []
+    for c in _comments(call, parent_id):
+        cid = c.get("id")
+        if not cid:
+            continue
+        doc_id = f"{parent_id}#comment:{cid}"
+        seen.append(doc_id)
+        author = _person(c.get("author"))
+        rev = c.get("modifiedTime") or c.get("createdTime")  # bumps when a reply is added
+        if store.upsert("gdocs", doc_id, title=f'Comment by {author} on "{parent_title}"',
+                        url=url, revision_id=rev, body=_comment_body(c, parent_title),
+                        meta={"created_at": c.get("createdTime"), "modified_at": rev,
+                              "author": author, "mime": "text/x-comment"}):
+            changed.append(doc_id)
+            log(f'gdocs: comment by {author} on "{parent_title}"')
+    return seen
 
 
 def _meta(meta: dict) -> dict:

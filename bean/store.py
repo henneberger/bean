@@ -231,8 +231,8 @@ class Store:
         where, params = ["1=1"], []
         if source:
             where.append("source = ?"); params.append(source)
-        if doc_like:
-            where.append("doc_id ILIKE ?"); params.append(f"%{doc_like}%")
+        if doc_like:  # match id OR title so "on my <doc name>" reaches comments keyed by an opaque id
+            where.append("(doc_id ILIKE ? OR title ILIKE ?)"); params += [f"%{doc_like}%", f"%{doc_like}%"]
         self._meta_filters(where, params, author, since, before)
         return self._rows(
             "SELECT source, doc_id, title, url, body, created_at, modified_at, author, mime, "

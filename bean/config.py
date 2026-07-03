@@ -107,6 +107,10 @@ DEFAULTS: dict = {
         # the last sync (cursor). Already-indexed files are retained past the window (only trashing
         # or losing access evicts them). 0 = no window (every file you own, every sync).
         "lookback_days": 30,
+        # Also index each Drive comment (+ its replies) as its own author-attributed, timestamped
+        # doc, so "eric's most recent comment on my doc" is answerable. Costs one extra API call per
+        # file per sync (comments live outside the file revision). false = don't fetch comments.
+        "comments": True,
     },
 }
 

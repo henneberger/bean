@@ -62,7 +62,8 @@ def _lookback(key, cfg, settings):
 # -- adapters (normalize each module's native signature to the registry contract) ---------------
 def _gdocs_sync(store, cfg, *, settings, fetch, full, since_days, log):
     return gdocs.sync(store, cfg, fetch=fetch, full=full, lookback_days=_lookback("gdocs", cfg, settings),
-                      ocr=settings.get("ocr", {}), log=log)
+                      ocr=settings.get("ocr", {}),
+                      comments=settings.get("gdocs", {}).get("comments", True), log=log)
 
 
 def _discord_sync(store, cfg, *, settings, fetch, full, since_days, log):

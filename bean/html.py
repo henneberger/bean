@@ -1,10 +1,10 @@
-"""Stdlib HTML → readable text/Markdown-ish, shared by every source that stores its bodies as
-HTML (Confluence storage format, Zendesk/Intercom articles, Salesforce/ServiceNow KB, arbitrary
-web pages). No lxml/bs4 dependency — bean owns no extra toolchain here, mirroring office.py.
+"""Stdlib HTML → readable text, shared by every source that stores its bodies as HTML (Confluence
+storage format, Zendesk articles, Salesforce/HubSpot KB, Microsoft Graph message bodies). No
+lxml/bs4 dependency — bean owns no extra toolchain here, mirroring office.py.
 
 `html_to_text` flattens markup to text with block breaks and light Markdown (headings, list
-bullets, links) preserved so chunks stay readable. `extract_readable` is a crude readability
-pass for full web pages: it drops script/style/nav/header/footer chrome, then flattens the rest."""
+bullets, links) preserved so chunks stay readable. Connectors hand it a body fragment they got
+from an API, not a whole web page, so there is no nav/chrome-stripping pass — just flattening."""
 
 from __future__ import annotations
 
@@ -12,18 +12,16 @@ import re
 from html import unescape
 from html.parser import HTMLParser
 
-# Tags whose entire subtree is chrome/noise, never body text.
-_DROP = {"script", "style", "head", "noscript", "svg", "nav", "header", "footer", "form",
-         "aside", "button", "iframe", "template"}
+# Tags whose entire subtree is never body text, even inside an API-provided fragment.
+_DROP = {"script", "style", "head", "noscript"}
 _BLOCK = {"p", "div", "section", "article", "br", "tr", "table", "ul", "ol", "blockquote",
           "pre", "figure", "hr", "h1", "h2", "h3", "h4", "h5", "h6", "li", "td", "th"}
 _HEADING = {"h1": "# ", "h2": "## ", "h3": "### ", "h4": "#### ", "h5": "##### ", "h6": "###### "}
 
 
 class _Flattener(HTMLParser):
-    def __init__(self, drop_chrome: bool):
+    def __init__(self):
         super().__init__(convert_charrefs=True)
-        self._drop_chrome = drop_chrome
         self._skip_depth = 0
         self._skip_tag: str | None = None
         self.out: list[str] = []
@@ -34,8 +32,7 @@ class _Flattener(HTMLParser):
             if tag == self._skip_tag:
                 self._skip_depth += 1
             return
-        drop = tag in _DROP if self._drop_chrome else tag in {"script", "style", "head", "noscript"}
-        if drop:
+        if tag in _DROP:
             self._skip_depth, self._skip_tag = 1, tag
             return
         if tag in _HEADING:
@@ -66,7 +63,7 @@ class _Flattener(HTMLParser):
         self.out.append(data)
 
 
-def _clean(raw: str) -> str:
+def _clean(raw) -> str:
     text = "".join(raw)
     text = re.sub(r"[ \t]+", " ", text)
     text = re.sub(r" *\n *", "\n", text)
@@ -75,29 +72,13 @@ def _clean(raw: str) -> str:
 
 
 def html_to_text(html: str) -> str:
-    """Markup → text keeping headings, bullets, links. Keeps inline chrome (nav/etc.) since the
-    caller already handed us just a body fragment (a wiki page, an article)."""
+    """Markup → text keeping headings, bullets, links. The caller already handed us a body fragment
+    (a wiki page, an article, a message body), so we flatten rather than run page-level readability."""
     if not html:
         return ""
-    p = _Flattener(drop_chrome=False)
+    p = _Flattener()
     try:
         p.feed(html)
     except Exception:
         return _clean(unescape(re.sub(r"<[^>]+>", " ", html)))
     return _clean(p.out)
-
-
-def extract_readable(html: str) -> tuple[str | None, str]:
-    """Full web page → (title, text). Drops nav/header/footer/script chrome — a crude readability
-    pass, good enough to make a page searchable without a heavyweight extractor."""
-    title = None
-    m = re.search(r"<title[^>]*>(.*?)</title>", html or "", re.I | re.S)
-    if m:
-        title = unescape(re.sub(r"\s+", " ", m.group(1))).strip()
-    p = _Flattener(drop_chrome=True)
-    try:
-        p.feed(html or "")
-        body = _clean(p.out)
-    except Exception:
-        body = _clean(unescape(re.sub(r"<[^>]+>", " ", html or "")))
-    return title, body
