@@ -1,19 +1,21 @@
 """bean CLI — the mechanism the Claude Code plugin drives (it is not meant to be used directly
 from a terminal; the plugin calls these subcommands to retrieve context).
 
-  bean init                       Connection status + exact next steps
+  bean init                       Connection status + exact next steps (paths, fields, lists)
   bean auth <provider> [--token]  google | slack | notion | github
-  bean add <ref>                  Doc/Drive URL, #channel, Notion page, owner/repo, or a path
-  bean remove <ref>
-  bean sync [source] [--full] [--since N]
-  bean search "question" [--source S] [--doc SUBSTR] [--k N] [--expand N] [--no-hybrid] [--json]
-  bean recent [--source S] [--doc SUBSTR] [--limit N] [--json]
-  bean thread <ref> [--source S] [--json]     Whole thread / document as one block
-  bean doc <ref> [--source S] [--json]        Full document body
-  bean neighbors <chunk-id> [--radius N] [--json]
+  bean sync [source] [--rebuild] [--since N]
+  bean search "question" [--source S] [--doc SUBSTR] [--k N] [--expand N]
+  bean recent [--source S] [--doc SUBSTR] [--limit N]
+  bean thread <ref> [--source S]              Whole thread / document as one block
+  bean doc <ref> [--source S]                 Full document body
+  bean neighbors <chunk-id> [--radius N]
   bean config [get PATH | set PATH VALUE | list]
-  bean reembed                    Re-chunk + re-embed everything with the current settings
-  bean status [--json]
+  bean status
+
+Tracked refs (docs/channels/pages/repos/paths) are written straight into a source's config lists —
+`bean init` prints each source's config file + list names. `sync --rebuild` does a full resweep:
+it ignores cursors, re-fetches, and re-embeds every doc (so a chunking or embedding-model change
+lands on the whole index).
 
 All state lives under ~/.bean/<repo-name>-<hash>/ — one workspace per repo. Credentials are
 per user at ~/.bean/credentials/ (mode 0600). Configuration is files, never env vars.
@@ -28,7 +30,7 @@ import sys
 from . import config as cfgmod
 from .search import (document_many, neighbors_many, recent_many, related_many, search_many,
                      thread_many)
-from .sources import BY_KEY, SOURCES, route_add
+from .sources import BY_KEY, SOURCES
 from .store import Store
 from .workspace import (Workspace, credential_context, credential_path, load_scopes,
                         set_source_scope, source_scope)
@@ -49,11 +51,6 @@ def _retrieval_wss(ws: Workspace) -> list:
     connector is global."""
     glob, _ = _scope_split()
     return [ws, Workspace.global_()] if glob else [ws]
-
-
-def _scoped_ws(ws: Workspace, source_key: str) -> Workspace:
-    """The workspace a given source's config + index live in, per its scope."""
-    return Workspace.global_() if source_scope(source_key) == "global" else ws
 
 
 def _ensure_lists(config: dict) -> dict:
@@ -123,60 +120,20 @@ def _scope_ctx(ws: Workspace):
     return (load_scopes(), _ensure_lists(ws.load_config()), _ensure_lists(gws.load_config()), gws)
 
 
-def _init_payload(ws: Workspace) -> dict:
-    """Machine-readable setup state — one entry per source so the assistant can set a source up by
-    writing files directly: where the credential JSON goes, which fields it takes, which config
-    lists hold tracked refs, and its scope (global = all repos, local = this repo)."""
+def cmd_init(ws: Workspace, args) -> int:
+    """Connection status + the exact next step for each source, in enough detail that the assistant
+    can set one up by writing files directly: credential path + fields, config path + the lists that
+    hold tracked refs, scope, and (where a source has one) the first-sync lookback prompt."""
     scopes, repo_cfg, glob_cfg, gws = _scope_ctx(ws)
-    from .workspace import bean_home
     from .sources import LOOKBACK_DEFAULTS
     settings = cfgmod.resolve(ws)
-    sources = []
+    print(f"bean workspace: {ws.dir}  (repo: {ws.repo})\n")
+    any_connected = False
     for s in SOURCES:
         scope = scopes.get(s.key, "local")
         cfg, cfgws = (glob_cfg, gws) if scope == "global" else (repo_cfg, ws)
         cred_ws = None if scope == "global" else ws
         with credential_context(cred_ws):
-            conn = s.connected() if s.connected else None
-        # Sources with a lookback window get a setup prompt: how far back the first sync reaches.
-        lb = None
-        if s.key in LOOKBACK_DEFAULTS:
-            current = (cfg.get(s.config_key) or {}).get("lookback_days",
-                       settings.get(s.key, {}).get("lookback_days", LOOKBACK_DEFAULTS[s.key]))
-            lb = {"days": current, "default": LOOKBACK_DEFAULTS[s.key],
-                  "config_key": f"{s.key}.lookback_days",
-                  "prompt": "how many days of history to index on the first sync (0 = all)"}
-        sources.append({
-            "key": s.key, "label": s.label, "scope": scope,
-            "auth": s.auth, "interactive_auth": s.interactive_auth,
-            "connected": bool(conn) if s.auth else None,
-            "credential_path": str(credential_path(s.auth, cred_ws)) if s.auth else None,
-            "credential_fields": s.auth_help or ("token" if s.auth else None),
-            "auth_command": (None if not s.auth else
-                             f"bean auth {s.auth}" + ("" if s.interactive_auth else f" {s.auth_help}".rstrip())),
-            "config_key": s.config_key, "config_path": str(cfgws.config_path),
-            "lists": list(s.lists), "add_help": s.add_help,
-            "tracked": _tracked(cfg, s),
-            "scope_command": f"bean scope {s.key} global|local",
-            "always_when_connected": s.always_when_connected,
-            "lookback": lb,
-        })
-    return {"workspace": str(ws.dir), "repo": str(ws.repo),
-            "global_workspace": str(gws.dir), "scopes_path": str(bean_home() / "scopes.json"),
-            "credentials_dir": str(_cred_path("x").parent), "sources": sources}
-
-
-def cmd_init(ws: Workspace, args) -> int:
-    if getattr(args, "json", False):
-        print(json.dumps(_init_payload(ws), indent=2))
-        return 0
-    scopes, repo_cfg, glob_cfg, _ = _scope_ctx(ws)
-    print(f"bean workspace: {ws.dir}  (repo: {ws.repo})\n")
-    any_connected = False
-    for s in SOURCES:
-        scope = scopes.get(s.key, "local")
-        cfg = glob_cfg if scope == "global" else repo_cfg
-        with credential_context(None if scope == "global" else ws):
             conn = s.connected() if s.connected else {"local": True}
         tracked = _tracked(cfg, s)
         mark = "x" if (conn and (tracked or s.always_when_connected)) else " "
@@ -189,20 +146,30 @@ def cmd_init(ws: Workspace, args) -> int:
                 head = "connected" + (f" ({ident})" if ident else "")
             else:
                 head = "ready (local, no auth)"
-            state = f"{head} — {tracked} tracked" if tracked else f"{head} — add: bean add {s.add_help}"
+            state = f"{head} — {tracked} tracked" if tracked else head
         else:
-            verb = "bean auth " + s.auth
-            state = f"→ {verb}" + ("" if s.interactive_auth else f" {s.auth_help}".rstrip())
+            state = f"→ bean auth {s.auth}" + ("" if s.interactive_auth else f" {s.auth_help}".rstrip())
         print(f"[{mark}] {s.label:<20} {scope:<6} {state}")
+        # Per-source setup detail — the paths + fields the assistant writes to (was `init --json`).
+        if s.auth:
+            print(f"      credential: {credential_path(s.auth, cred_ws)}"
+                  + (f"   fields: {s.auth_help}" if s.auth_help else ""))
+        lists = "|".join(s.lists)
+        print(f"      config:     {cfgws.config_path}  →  {s.config_key}.[{lists}]"
+              + (f"   ({s.add_help})" if s.add_help else ""))
+        if s.always_when_connected:
+            print("      indexes everything once connected; tracked refs only narrow scope")
+        if s.key in LOOKBACK_DEFAULTS:
+            current = (cfg.get(s.config_key) or {}).get("lookback_days",
+                       settings.get(s.key, {}).get("lookback_days", LOOKBACK_DEFAULTS[s.key]))
+            print(f"      lookback:   {current}d on first sync (0=all) — "
+                  f"set: bean config set {s.key}.lookback_days N")
     print("\nScope: `global` connectors index once and are searchable from every repo; `local` ones "
           "are scoped to this repo (e.g. a GitHub project). **Ask the user per connector**, then set "
-          "it with `bean scope <source> global|local` (or `bean add <ref> --global` / `--local`).")
-    print("\nSetup is assistant-guided. For each source you want, either:")
-    print("  • paste the token and let the assistant run the command / write the files, or")
-    print("  • run the printed `bean auth …` yourself (token never leaves your machine), or")
-    print("  • write the credential JSON to its `credential_path` (shared dir for global connectors,")
-    print("    this repo's workspace for local ones) and refs into config yourself.")
-    print("  (`bean init --json` prints the exact path + fields + scope for every source.)")
+          "it with `bean scope <source> global|local`.")
+    print("\nSetup is assistant-guided. For each source, either paste the token and let the assistant "
+          "run `bean auth …` / write the files, run the printed `bean auth …` yourself, or write the "
+          "credential JSON to its `credential:` path and tracked refs into its `config:` file.")
     if any_connected:
         print("\nThen: bean sync ")
         print('Ask:  bean search "how do refunds work?"')
@@ -231,15 +198,9 @@ def cmd_status(ws: Workspace, args) -> int:
         sources[s.key] = {"connected": bool(conn), "scope": scope, "tracked": _tracked(cfg, s),
                           "indexed": counts.get(s.key, 0),
                           "lists": {name: node.get(name) or [] for name in s.lists}}
-    payload = {"workspace": str(ws.dir), "repo": str(ws.repo), "global_workspace": str(gws.dir),
-               "embedding": {"configured": settings["embedding"]["model"], "indexed_with": indexed_model},
-               "last_sync_age_days": age, "stale": stale, "sources": sources}
-    if args.json:
-        print(json.dumps(payload, indent=2))
-        return 0
     print(f"workspace: {ws.dir}")
     em = settings["embedding"]["model"]
-    warn = "" if (not indexed_model or indexed_model == em) else f"  ⚠ index built with {indexed_model} — run `bean reembed`"
+    warn = "" if (not indexed_model or indexed_model == em) else f"  ⚠ index built with {indexed_model} — run `bean sync --rebuild`"
     print(f"embedding: {em}{warn}")
     sync_line = "never synced" if age is None else f"{age}d ago" + ("  ⚠ stale — run `bean sync`" if stale else "")
     print(f"last sync:  {sync_line}")
@@ -250,7 +211,7 @@ def cmd_status(ws: Workspace, args) -> int:
     return 0
 
 
-# -- auth / add / remove ------------------------------------------------------------------------
+# -- auth ---------------------------------------------------------------------------------------
 def cmd_auth(ws: Workspace, args) -> int:
     src = AUTH.get(args.provider)
     if not src:
@@ -277,53 +238,6 @@ def cmd_auth(ws: Workspace, args) -> int:
     except Exception as err:
         print(f"✗ {err}", file=sys.stderr)
         return 1
-    return 0
-
-
-def cmd_add(ws: Workspace, args) -> int:
-    routed = route_add(args.item)
-    if not routed:
-        print("Not a recognized ref. Expected a Google Doc/Drive URL, #channel, Notion page URL,\n"
-              "owner/repo (or github.com URL), or a file/folder path.", file=sys.stderr)
-        return 2
-    src, list_key, value = routed
-    # Scope: an explicit flag, else the source's existing scope (default local). Global sources'
-    # items live in the shared ~/.bean/_global workspace; local ones in this repo's workspace.
-    scope = "global" if args.global_ else ("local" if args.local else source_scope(src.key))
-    target_ws = Workspace.global_() if scope == "global" else ws
-    config = _ensure_lists(target_ws.load_config())
-    target = config[src.config_key][list_key]
-    if value not in target:
-        target.append(value)
-    target_ws.save_config(config)
-    set_source_scope(src.key, scope)
-    where = "all repos (global)" if scope == "global" else "this repo (local)"
-    print(f"✓ tracking {args.item} in {src.label} [{where}] — next: bean sync")
-    return 0
-
-
-def cmd_remove(ws: Workspace, args) -> int:
-    routed = route_add(args.item)
-    candidates = {args.item, args.item.lstrip("#")}
-    if routed and isinstance(routed[2], str):  # some refs (e.g. sqldb queries) are dicts, not ids
-        candidates.add(routed[2])
-    removed = False
-    for w in (ws, Workspace.global_()):  # a ref could be tracked in either scope
-        config = _ensure_lists(w.load_config())
-        changed = False
-        for s in SOURCES:
-            for name in s.lists:
-                lst = config[s.config_key][name]
-                for value in list(lst):
-                    if isinstance(value, str) and value in candidates:
-                        lst.remove(value)
-                        removed = changed = True
-        if changed:
-            w.save_config(config)
-    if not removed:
-        print(f'"{args.item}" is not tracked — see bean status.', file=sys.stderr)
-        return 2
-    print(f"✓ untracked {args.item}")
     return 0
 
 
@@ -379,14 +293,14 @@ def cmd_scope(ws: Workspace, args) -> int:
     return 0
 
 
-# -- sync / reembed -----------------------------------------------------------------------------
+# -- sync ---------------------------------------------------------------------------------------
 def cmd_sync(ws: Workspace, args) -> int:
     from .sync import run_sync
     glob, loc = _scope_split()
     log = lambda m: print(f"  · {m}", file=sys.stderr)  # noqa: E731
-    results = [run_sync(ws, only=args.source, keys=loc, full=args.full, since_days=args.since, log=log)]
+    results = [run_sync(ws, only=args.source, keys=loc, full=args.rebuild, since_days=args.since, log=log)]
     if glob:  # global sources sync into the shared workspace
-        results.append(run_sync(Workspace.global_(), only=args.source, keys=glob, full=args.full,
+        results.append(run_sync(Workspace.global_(), only=args.source, keys=glob, full=args.rebuild,
                                 since_days=args.since, log=log))
     errors = [e for r in results for e in r["errors"]]
     changed = sum(len(r["changed"]) for r in results)
@@ -401,22 +315,8 @@ def cmd_sync(ws: Workspace, args) -> int:
     return 1 if errors else 0
 
 
-def cmd_reembed(ws: Workspace, args) -> int:
-    from .sync import reembed
-    log = lambda m: print(f"  · {m}", file=sys.stderr)  # noqa: E731
-    r = reembed(ws, log=log)
-    docs, chunks = r["docs"], r["chunks"]
-    rg = reembed(Workspace.global_(), log=log)  # also the shared global index (no-op if empty)
-    docs += rg["docs"]; chunks += rg["chunks"]
-    print(f"✓ re-embedded {docs} document(s) → {chunks} chunk(s) with {r['model']}.")
-    return 0
-
-
 # -- retrieval ----------------------------------------------------------------------------------
-def _print_hits(query: str | None, hits: list[dict], as_json: bool, empty: str) -> int:
-    if as_json:
-        print(json.dumps(hits, indent=2))
-        return 0 if hits else 1
+def _print_hits(query: str | None, hits: list[dict], empty: str) -> int:
     if not hits:
         print(empty)
         return 1
@@ -439,85 +339,53 @@ def cmd_search(ws: Workspace, args) -> int:
         return 2
     hits = search_many(_retrieval_wss(ws), query, queries=args.variant, k=args.k,
                        source=args.source, doc_like=args.doc, expand=args.expand,
-                       hybrid=not args.no_hybrid, author=args.author, since=args.since,
-                       before=args.before)
-    return _print_hits(query, hits, args.json,
+                       author=args.author, since=args.since, before=args.before)
+    return _print_hits(query, hits,
                        "No matches. Have you run `bean sync`? (`bean status` shows what's indexed.)")
 
 
 def cmd_recent(ws: Workspace, args) -> int:
     hits = recent_many(_retrieval_wss(ws), source=args.source, doc_like=args.doc,
                        author=args.author, since=args.since, before=args.before, limit=args.limit)
-    return _print_hits(None, hits, args.json, "Nothing indexed yet — run `bean sync`.")
+    return _print_hits(None, hits, "Nothing indexed yet — run `bean sync`.")
 
 
 def cmd_related(ws: Workspace, args) -> int:
     hits = related_many(_retrieval_wss(ws), args.ref, source=args.source, limit=args.limit)
-    return _print_hits(None, hits, args.json,
+    return _print_hits(None, hits,
                        f'No documents related to "{args.ref}" (graph edges build on `bean sync`).')
 
 
 def cmd_thread(ws: Workspace, args) -> int:
     hits = thread_many(_retrieval_wss(ws), args.ref, source=args.source)
-    return _print_hits(None, hits, args.json, f'No thread/document matching "{args.ref}".')
+    return _print_hits(None, hits, f'No thread/document matching "{args.ref}".')
 
 
 def cmd_doc(ws: Workspace, args) -> int:
     hits = document_many(_retrieval_wss(ws), args.ref, source=args.source)
-    return _print_hits(None, hits, args.json, f'No document matching "{args.ref}".')
+    return _print_hits(None, hits, f'No document matching "{args.ref}".')
 
 
 def cmd_neighbors(ws: Workspace, args) -> int:
     hits = neighbors_many(_retrieval_wss(ws), args.chunk_id, radius=args.radius)
-    return _print_hits(None, hits, args.json, f'No chunk "{args.chunk_id}".')
+    return _print_hits(None, hits, f'No chunk "{args.chunk_id}".')
 
 
 # -- plugins ------------------------------------------------------------------------------------
 def cmd_plugins(ws: Workspace, args) -> int:
-    """List / enable / disable connectors beyond the core set — bundled prototypes and drop-in
-    plugin files. Enabling writes the name into the global config's plugins.prototypes."""
-    from .sources import Source, CORE_SOURCES, reload_sources
-    from .prototypes import registry
+    """List connectors beyond the core set — drop-in plugin files under the plugin dirs. Every
+    `*.py` there is loaded automatically; there's nothing to enable."""
+    from .sources import Source, CORE_SOURCES
     from .plugins import plugin_dirs, discover_sources
-    available = registry.build(Source)
     g = cfgmod.load_global()
-    enabled = list((g.get("plugins") or {}).get("prototypes") or [])
 
-    if args.action in (None, "list"):
-        core = {s.key for s in CORE_SOURCES}
-        print("core connectors (always on):")
-        print("  " + ", ".join(sorted(core)))
-        print("\nprototypes (enable with `bean plugins enable <name>`):")
-        for name in sorted(available):
-            mark = "x" if name in enabled else " "
-            print(f"  [{mark}] {name:<14} {available[name].label}")
-        files = [f.name for d in plugin_dirs(g) for f in __import__("pathlib").Path(d).glob("*.py")
-                 if __import__("pathlib").Path(d).is_dir() and f.name != "__init__.py"]
-        drop = discover_sources(Source, global_config=g, prototypes=[])
-        print(f"\ndrop-in plugins ({', '.join(str(d) for d in plugin_dirs(g))}):")
-        print("  " + (", ".join(f"{s.key}" for s in drop) or "(none)"))
-        return 0
-
-    if args.action in ("enable", "disable"):
-        if not args.name:
-            print(f"Usage: bean plugins {args.action} <name>", file=sys.stderr)
-            return 2
-        if args.name not in available:
-            print(f"Unknown prototype {args.name!r}. See `bean plugins list`.", file=sys.stderr)
-            return 2
-        if args.action == "enable" and args.name not in enabled:
-            enabled.append(args.name)
-        elif args.action == "disable" and args.name in enabled:
-            enabled.remove(args.name)
-        g.setdefault("plugins", {})["prototypes"] = enabled
-        cfgmod.save_global(g)
-        reload_sources()
-        print(f"✓ {args.name} {'enabled' if args.action == 'enable' else 'disabled'} — "
-              f"now: {', '.join(enabled) or '(none)'}")
-        return 0
-
-    print("Usage: bean plugins [list | enable <name> | disable <name>]", file=sys.stderr)
-    return 2
+    core = {s.key for s in CORE_SOURCES}
+    print("core connectors (always on):")
+    print("  " + ", ".join(sorted(core)))
+    drop = discover_sources(Source, global_config=g)
+    print(f"\ndrop-in plugins ({', '.join(str(d) for d in plugin_dirs(g))}):")
+    print("  " + (", ".join(f"{s.key}" for s in drop) or "(none)"))
+    return 0
 
 
 # -- config -------------------------------------------------------------------------------------
@@ -537,8 +405,8 @@ def cmd_config(ws: Workspace, args) -> int:
         cfgmod.set_in(g, args.path, args.value)
         cfgmod.save_global(g)
         print(f"✓ {args.path} = {json.dumps(cfgmod.get(cfgmod.resolve(ws), args.path))}")
-        if args.path.startswith(("embedding.", "chunking.")):
-            print("  (changes the index shape — run `bean reembed` to apply it to existing docs.)")
+        if args.path.startswith(("embedding.", "chunking.")) or ".chunking." in args.path:
+            print("  (changes the index shape — run `bean sync --rebuild` to apply it to existing docs.)")
         return 0
     print(f"Unknown config action. Known paths:\n  " + "\n  ".join(cfgmod.known_paths()), file=sys.stderr)
     return 2
@@ -551,7 +419,6 @@ def main(argv: list[str] | None = None) -> int:
     sub = parser.add_subparsers(dest="cmd", required=True)
 
     p = sub.add_parser("init", help="connection status + next steps")
-    p.add_argument("--json", action="store_true", help="machine-readable setup schema (cred paths + fields)")
     p.set_defaults(fn=cmd_init)
 
     p = sub.add_parser("auth", help="connect a provider")
@@ -565,17 +432,6 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--method", help="auth method when a provider supports several (e.g. device|az)")
     p.set_defaults(fn=cmd_auth)
 
-    p = sub.add_parser("add", help="track a doc/channel/page/repo/path")
-    p.add_argument("item")
-    p.add_argument("--global", dest="global_", action="store_true",
-                   help="track for ALL repos (shared global index)")
-    p.add_argument("--local", action="store_true", help="track for THIS repo only (default)")
-    p.set_defaults(fn=cmd_add)
-
-    p = sub.add_parser("remove", help="stop tracking a ref")
-    p.add_argument("item")
-    p.set_defaults(fn=cmd_remove)
-
     p = sub.add_parser("scope", help="show/set whether a connector is global (all repos) or local")
     p.add_argument("source", nargs="?", choices=SOURCE_KEYS)
     p.add_argument("value", nargs="?", choices=["global", "local"])
@@ -583,12 +439,11 @@ def main(argv: list[str] | None = None) -> int:
 
     p = sub.add_parser("sync", help="fetch changes and re-embed them")
     p.add_argument("source", nargs="?", choices=SOURCE_KEYS)
-    p.add_argument("--full", action="store_true")
+    p.add_argument("--rebuild", action="store_true",
+                   help="full resweep: ignore cursors, re-fetch back --since, and re-embed every "
+                        "doc (applies a chunking / embedding-model change to the whole index)")
     p.add_argument("--since", type=int, default=90)
     p.set_defaults(fn=cmd_sync)
-
-    p = sub.add_parser("reembed", help="re-embed everything with current settings")
-    p.set_defaults(fn=cmd_reembed)
 
     p = sub.add_parser("search", help="hybrid semantic + keyword search")
     p.add_argument("query", nargs="+")
@@ -602,8 +457,6 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--since", help="only docs modified on/after this date (YYYY-MM-DD)")
     p.add_argument("--before", help="only docs modified before this date (YYYY-MM-DD)")
     p.add_argument("--expand", type=int, default=None, help="neighbouring chunks pulled in per hit")
-    p.add_argument("--no-hybrid", action="store_true", help="vector only (skip keyword fusion)")
-    p.add_argument("--json", action="store_true")
     p.set_defaults(fn=cmd_search)
 
     p = sub.add_parser("recent", help="most recently changed docs/messages")
@@ -613,32 +466,27 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--since", help="only docs modified on/after this date (YYYY-MM-DD)")
     p.add_argument("--before", help="only docs modified before this date (YYYY-MM-DD)")
     p.add_argument("--limit", type=int, default=20)
-    p.add_argument("--json", action="store_true")
     p.set_defaults(fn=cmd_recent)
 
     p = sub.add_parser("related", help="documents one hop away in the graph (same repo/project/channel/author)")
     p.add_argument("ref", help="a doc id/title substring to expand from")
     p.add_argument("--source", choices=SOURCE_KEYS)
     p.add_argument("--limit", type=int, default=20)
-    p.add_argument("--json", action="store_true")
     p.set_defaults(fn=cmd_related)
 
     p = sub.add_parser("thread", help="a whole thread/document as one block")
     p.add_argument("ref")
     p.add_argument("--source", choices=SOURCE_KEYS)
-    p.add_argument("--json", action="store_true")
     p.set_defaults(fn=cmd_thread)
 
     p = sub.add_parser("doc", help="full document body")
     p.add_argument("ref")
     p.add_argument("--source", choices=SOURCE_KEYS)
-    p.add_argument("--json", action="store_true")
     p.set_defaults(fn=cmd_doc)
 
     p = sub.add_parser("neighbors", help="chunks surrounding a chunk id")
     p.add_argument("chunk_id")
     p.add_argument("--radius", type=int, default=3)
-    p.add_argument("--json", action="store_true")
     p.set_defaults(fn=cmd_neighbors)
 
     p = sub.add_parser("config", help="view or set configuration")
@@ -648,12 +496,9 @@ def main(argv: list[str] | None = None) -> int:
     p.set_defaults(fn=cmd_config)
 
     p = sub.add_parser("status", help="workspace, auth, and index state")
-    p.add_argument("--json", action="store_true")
     p.set_defaults(fn=cmd_status)
 
-    p = sub.add_parser("plugins", help="list / enable / disable prototype + drop-in connectors")
-    p.add_argument("action", nargs="?", choices=["list", "enable", "disable"])
-    p.add_argument("name", nargs="?")
+    p = sub.add_parser("plugins", help="list drop-in connectors loaded from the plugin dirs")
     p.set_defaults(fn=cmd_plugins)
 
     args = parser.parse_args(argv)

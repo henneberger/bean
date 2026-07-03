@@ -3,7 +3,7 @@
 bean ships two things from one repo, versioned together:
 
 - the **`bean` Python package** (`pyproject.toml`, hatchling) — the CLI/engine, and
-- the **Claude Code plugin** (`.claude-plugin/plugin.json`, `SKILL.md`, `skills/`, `scripts/beanw.py`)
+- the **Claude Code plugin** (`.claude-plugin/plugin.json`, `SKILL.md`, `skills/`, `scripts/bean.py`)
   — distributed as the repo itself; the marketplace entry points at `./`.
 
 A release = a single version bumped across both manifests, a green offline test suite, built
@@ -17,7 +17,7 @@ artifacts, and a git tag `vX.Y.Z`. It is driven by `scripts/release.py` (pure st
 
 ## Cut a release
 
-Prereqs: the plugin venv (`make venv`, or any `beanw.py` run bootstraps it) and the `build` package
+Prereqs: the plugin venv (`make venv`, or any `bean.py` run bootstraps it) and the `build` package
 (`make build` installs it, or `pip install -e '.[dev]'`).
 
 ```
@@ -67,12 +67,17 @@ make clean                                     # remove dist/ build/ *.egg-info 
 Newest first. Dates are the tag date.
 
 ### Unreleased
+- **CLI simplification + per-source chunking** — removed `bean add`/`remove`/`reembed`; `sync --full`
+  is now `sync --rebuild` (re-fetches AND re-embeds every doc, absorbing reembed); all `--json` output
+  and the `--no-hybrid` flag removed (commands are human-readable; `bean init` prints setup detail as
+  text); chunking is now per-source configurable (global `chunking` defaults + `<source>.chunking`
+  overrides, Slack smaller by default).
 - **Smart lookback windows** — `lookback_days` is now the one-time *initial backfill*, chosen at
   setup, not a per-sync window. Every windowed source (`slack`/`discord`/`gdocs`) reaches back
-  `lookback_days` on its first sync, then tracks a cursor and pulls only what's new; `--full` still
+  `lookback_days` on its first sync, then tracks a cursor and pulls only what's new; `--rebuild` still
   reaches back `--since`. Slack/Discord no longer re-fetch a rolling 14-day window each sync, and
   Google Drive gained the same cursor. Lookback is a per-connector setting (resolved connector-first
-  then from settings), and `init --json` carries a `lookback` block per source so setup prompts for it.
+  then from settings), and `bean init` surfaces each source's first-sync lookback.
 - **README** — install command up top (`/plugin marketplace add` + `/plugin install`); dropped the
   Development section; Notion no longer listed in the connector table.
 - **Google Drive PDFs** — the Drive connector now indexes native PDFs (owned files + tracked
@@ -95,8 +100,8 @@ Newest first. Dates are the tag date.
   metadata-derived graph (`bean related`, `--author/--since/--before`).
 - **Stale-index warning** — read commands warn when the index is older than `sync.stale_days` (7);
   bean never auto-syncs.
-- **Plugin system** — 12 core connectors, ~45 prototypes (`bean plugins enable`), and drop-in
-  plugins from `~/.bean/plugins/` plus `docs/authoring-connectors.md` (the authoring guide).
+- **Plugin system** — 12 core connectors plus drop-in plugins from `~/.bean/plugins/`, with
+  `docs/authoring-connectors.md` (the authoring guide).
 - **Release tooling** — `scripts/release.py`, `Makefile`, this document.
 
 ### 0.1.0

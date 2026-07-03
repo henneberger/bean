@@ -20,7 +20,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          # bean ships as a Claude Code plugin that runs in its own venv (scripts/beanw.py),
+          # bean ships as a Claude Code plugin that runs in its own venv (scripts/bean.py),
           # not as a pip library people install across interpreters — so we test one version,
           # the one the plugin's venv uses, rather than a matrix.
           python-version: '3.12'

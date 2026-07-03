@@ -26,11 +26,18 @@ from bean.chunks import chunk_text  # noqa: E402
 from bean.workspace import Workspace, save_credential, load_credential, bean_home  # noqa: E402
 from bean import gdocs, slack, config as cfgmod, localfiles, notion, github, pdf  # noqa: E402
 from bean.index import search as lance_search  # noqa: E402
-from bean.sync import run_sync, reembed  # noqa: E402
+from bean.sync import run_sync  # noqa: E402
 from bean.search import search as hybrid_search, recent, thread, neighbors  # noqa: E402
 from bean.sources import route_add  # noqa: E402
 
 CHECKS = FAILED = 0
+
+
+def reembed(ws, *, embed_fn=None, log=lambda m: None):
+    """`bean sync --rebuild` with no live fetch: re-embed every stored doc with the current
+    settings (there's no standalone reembed command anymore — --rebuild absorbed it)."""
+    r = run_sync(ws, full=True, refetch=False, embed_fn=embed_fn, log=log)
+    return {"docs": r["embedded"], "chunks": r["chunks"]}
 
 
 def ok(cond, msg):
@@ -249,9 +256,9 @@ with Store(aws) as store:
     # smart lookback: the next sync's discovery query starts from the cursor, not the fixed window
     sa2 = gdocs.sync(store, {}, token_fn=lambda force=False: "tok", fetch=afetch, lookback_days=30)
     ok("modifiedTime > '2026-04-01T00:00:00Z'" in seen_q["q"], "second sync discovers only files changed since the cursor")
-    # --full ignores the cursor and reaches back over the lookback window again
+    # --rebuild ignores the cursor and reaches back over the lookback window again
     gdocs.sync(store, {}, token_fn=lambda force=False: "tok", fetch=afetch, lookback_days=30, full=True)
-    ok("modifiedTime > '2026-04-01T00:00:00Z'" not in seen_q["q"], "--full ignores the cursor")
+    ok("modifiedTime > '2026-04-01T00:00:00Z'" not in seen_q["q"], "--rebuild ignores the cursor")
 
     # a later crawl that no longer returns m2 still retains it (only trash/access-loss evicts)
     def afetch2(url, headers):
@@ -360,20 +367,30 @@ g = cfgmod.load_global(); cfgmod.set_in(g, "chunking.lines", "20"); cfgmod.set_i
 ok(g["chunking"]["lines"] == 20 and g["search"]["hybrid"] is True, "config set coerces to leaf type")
 cfgmod.save_global({})  # reset so downstream resolves to defaults
 
-# -- lookback: connector-level config + setup prompt schema -------------------------------------
-from bean.cli import _init_payload  # noqa: E402
+# -- per-source chunking: global defaults + per-source overrides --------------------------------
+_cc = cfgmod.resolve()
+ok(cfgmod.chunking_for(_cc, "gdocs")["lines"] == 40, "a source with no override uses the global chunking default")
+ok(cfgmod.chunking_for(_cc, "slack")["lines"] == 15 and cfgmod.chunking_for(_cc, "slack")["max_chars"] == 1000,
+   "slack ships smaller default windows")
+ok(cfgmod.chunking_for(_cc, "slack")["title_prefix"] is True,
+   "an override inherits the global block's un-overridden leaves")
+cfgmod.save_global({"chunking": {"lines": 60}, "notion": {"chunking": {"lines": 8}}})
+_cc2 = cfgmod.resolve()
+ok(cfgmod.chunking_for(_cc2, "gdocs")["lines"] == 60, "a global chunking change reaches sources without their own override")
+ok(cfgmod.chunking_for(_cc2, "notion")["lines"] == 8, "a per-source chunking override wins over the global block")
+g2 = cfgmod.load_global(); cfgmod.set_in(g2, "notion.chunking.lines", "12")
+ok(g2["notion"]["chunking"]["lines"] == 12, "config set coerces a per-source chunking leaf to int")
+cfgmod.save_global({})  # reset
+
+# -- lookback: connector-level config resolution ------------------------------------------------
 from bean.sources import LOOKBACK_DEFAULTS, _lookback  # noqa: E402
 ok(LOOKBACK_DEFAULTS == {"slack": 14, "discord": 14, "gdocs": 30}, "lookback sources: slack, discord, gdocs")
 ok(_lookback("discord", {}, {}) == 14, "lookback falls back to the built-in default")
 ok(_lookback("discord", {}, {"discord": {"lookback_days": 3}}) == 3, "resolved setting overrides the default")
 ok(_lookback("discord", {"lookback_days": 5}, {"discord": {"lookback_days": 3}}) == 5,
    "tracked-config lookback wins over the setting")
-_payload = _init_payload(Workspace(repo("lb")))
-_by = {s["key"]: s for s in _payload["sources"]}
-ok(_by["gdocs"]["lookback"]["config_key"] == "gdocs.lookback_days" and _by["gdocs"]["lookback"]["days"] == 30,
-   "init schema surfaces the gdocs lookback prompt")
-ok(_by["slack"]["lookback"] and _by["discord"]["lookback"], "slack + discord carry a lookback prompt too")
-ok(_by["github"]["lookback"] is None and _by["notion"]["lookback"] is None, "sources without a window have no prompt")
+ok("github" not in LOOKBACK_DEFAULTS and "notion" not in LOOKBACK_DEFAULTS,
+   "sources without a window carry no lookback")
 
 # -- source routing -----------------------------------------------------------------------------
 ok(route_add("#eng")[0].key == "slack", "#channel routes to slack")
@@ -464,9 +481,9 @@ with Store(hws) as store:
     first_chunk = store.find_docs(source="gdocs")  # sanity that docs exist
 ok(bool(first_chunk), "find_docs returns documents")
 
-# -- reembed onto different settings ------------------------------------------------------------
+# -- sync --rebuild re-embeds onto different settings -------------------------------------------
 re_res = reembed(hws, embed_fn=fake_embed)
-ok(re_res["docs"] == 2 and re_res["chunks"] >= 2, "reembed rebuilds every stored doc")
+ok(re_res["docs"] == 2 and re_res["chunks"] >= 2, "--rebuild re-embeds every stored doc")
 
 # == retrieval upgrades: weighted RRF, routing, recency, merge, enrichment, large chunks, rerank ==
 from bean.search import related as _related, _merge_sections, _query_weights  # noqa: E402
@@ -734,9 +751,6 @@ with Store(nws) as store:
 
 # == new connectors (offline: fake fetch, real Store) ===========================================
 from bean import confluence, jira, zendesk, discord, microsoft, salesforce  # noqa: E402  (core)
-from bean.prototypes import (linear, asana, trello, intercom, gmail, coda, servicenow,  # noqa: E402
-                             readwise, figma, web, rss, obsidian, sqldb, airtable, gsheets,
-                             dropbox, buckets)
 
 
 def check(name, fn):
@@ -783,40 +797,6 @@ def t_jira():
         ok(r["changed"] == ["PROJ-1"], f"jira issue ingested ({r})")
 
 
-def t_linear():
-    save_credential("linear", {"token": "lin"})
-    def f(u, h, method="GET", body=None):
-        return res(200, {"data": {"issues": {"nodes": [{"identifier": "ENG-1", "title": "T",
-            "description": "d", "updatedAt": "2026-01-01T00:00:00Z", "url": "http://l",
-            "state": {"name": "Todo"}, "assignee": None, "comments": {"nodes": []}}],
-            "pageInfo": {"hasNextPage": False, "endCursor": None}}}})
-    with _store("linear") as s:
-        r = linear.sync(s, {"teams": ["ENG"]}, settings={}, fetch=f)
-        ok(r["changed"] == ["ENG-1"], f"linear issue ingested via GraphQL ({r})")
-
-
-def t_asana():
-    save_credential("asana", {"token": "t"})
-    def f(u, h, method="GET", body=None):
-        if "/stories" in u:
-            return res(200, {"data": []})
-        return res(200, {"data": [{"gid": "g1", "name": "Task", "notes": "n",
-                                   "modified_at": "2026-01-01"}]})
-    with _store("asana") as s:
-        r = asana.sync(s, {"projects": ["p1"]}, settings={}, fetch=f)
-        ok(r["changed"] == ["g1"], f"asana task ingested ({r})")
-
-
-def t_trello():
-    save_credential("trello", {"key": "k", "token": "t"})
-    def f(u, h, method="GET", body=None):
-        return res(200, [{"id": "c1", "name": "Card", "desc": "d", "url": "http://t",
-                          "dateLastActivity": "2026-01-01", "actions": []}])
-    with _store("trello") as s:
-        r = trello.sync(s, {"boards": ["b1"]}, settings={}, fetch=f)
-        ok(r["changed"] == ["c1"], f"trello card ingested ({r})")
-
-
 def t_zendesk():
     save_credential("zendesk", {"subdomain": "acme", "email": "e", "token": "t"})
     def f(u, h, method="GET", body=None):
@@ -834,24 +814,6 @@ def t_zendesk():
     with _store("zendesk") as s:
         r = zendesk.sync(s, {}, settings={}, fetch=f, now=200.0)
         ok(sorted(r["changed"]) == ["article/3", "ticket/7"], f"zendesk tickets+articles ({r})")
-
-
-def t_intercom():
-    save_credential("intercom", {"token": "t"})
-    def f(u, h, method="GET", body=None):
-        if "/conversations/11" in u:
-            return res(200, {"id": "11", "updated_at": 100, "created_at": 90,
-                "source": {"body": "<p>hi</p>", "author": {"name": "cust"}},
-                "conversation_parts": {"conversation_parts": []}})
-        if "/conversations" in u:
-            return res(200, {"conversations": [{"id": "11", "updated_at": 100}], "pages": {}})
-        if "/articles" in u:
-            return res(200, {"data": [{"id": "5", "title": "A", "body": "<p>b</p>",
-                                       "updated_at": 100, "created_at": 90}], "pages": {}})
-        return res(404, {})
-    with _store("intercom") as s:
-        r = intercom.sync(s, {}, settings={}, fetch=f)
-        ok(sorted(r["changed"]) == ["article/5", "conversation/11"], f"intercom convo+article ({r})")
 
 
 def t_discord():
@@ -875,24 +837,6 @@ def t_discord():
         ok("hello team" in s.get("discord", f"general/{week}").body, "discord message rendered")
 
 
-def t_gmail():
-    import base64 as _b64
-    save_credential("gmail", {"method": "gcloud"})
-    data = _b64.urlsafe_b64encode(b"Hello from the thread").decode().rstrip("=")
-    def f(u, h, method="GET", body=None):
-        if "/threads/t1" in u:
-            return res(200, {"id": "t1", "historyId": "55", "messages": [{"payload": {
-                "mimeType": "text/plain", "headers": [{"name": "Subject", "value": "Hi"},
-                {"name": "From", "value": "a@b.c"}], "body": {"data": data}}}]})
-        if "/threads" in u:
-            return res(200, {"threads": [{"id": "t1", "historyId": "55"}]})
-        return res(404, {})
-    with _store("gmail") as s:
-        r = gmail.sync(s, {"queries": ["x"]}, settings={}, fetch=f, token_fn=lambda force=False: "tok")
-        ok(r["changed"] == ["thread/t1"], f"gmail thread ingested (gcloud) ({r})")
-        ok("Hello from the thread" in s.get("gmail", "thread/t1").body, "gmail body base64url-decoded")
-
-
 def t_microsoft():
     save_credential("microsoft", {"method": "az"})
     def f(u, h, method="GET", body=None):
@@ -905,25 +849,6 @@ def t_microsoft():
     with _store("microsoft") as s:
         r = microsoft.sync(s, {"drives": ["me"]}, settings={}, fetch=f, token_fn=lambda force=False: "tok")
         ok(r["changed"] == ["file/F1"], f"microsoft onedrive file ingested ({r})")
-
-
-def t_coda():
-    save_credential("coda", {"token": "t"})
-    def f(u, h, method="GET", body=None):
-        p = u.split("?")[0]
-        if method == "POST" and p.endswith("/export"):
-            return res(200, {"id": "r1", "href": "https://coda.io/apis/v1/docs/D1/pages/p1/export/r1"})
-        if "/export/" in p:
-            return res(200, {"status": "complete", "downloadLink": "https://dl/coda"})
-        if p.endswith("/pages"):
-            return res(200, {"items": [{"id": "p1", "name": "Page", "contentVersion": 3,
-                                        "browserLink": "http://c"}]})
-        if p.startswith("https://dl/"):
-            return res(200, "# Page body")
-        return res(404, {})
-    with _store("coda") as s:
-        r = coda.sync(s, {"docs": ["D1"]}, settings={}, fetch=f, sleep=lambda x: None)
-        ok(r["changed"] == ["D1/p1"], f"coda page exported+ingested ({r})")
 
 
 def t_salesforce():
@@ -941,426 +866,14 @@ def t_salesforce():
         ok(sorted(r["changed"]) == ["article/k1", "case/c1"], f"salesforce KB+cases ({r})")
 
 
-def t_servicenow():
-    save_credential("servicenow", {"method": "token", "subdomain": "acme", "token": "t"})
-    def f(u, h, method="GET", body=None):
-        if "/table/kb_knowledge" in u:
-            return res(200, {"result": [{"sys_id": "a1", "short_description": "KB",
-                                         "text": "<p>t</p>", "sys_updated_on": "2026-01-01"}]})
-        if "/table/incident" in u:
-            return res(200, {"result": [{"sys_id": "i1", "short_description": "Inc",
-                "description": "<p>d</p>", "number": "INC1", "sys_updated_on": "2026-01-01"}]})
-        return res(200, {"result": []})
-    with _store("servicenow") as s:
-        r = servicenow.sync(s, {}, settings={}, fetch=f)
-        ok(sorted(r["changed"]) == ["incident/i1", "kb_knowledge/a1"], f"servicenow KB+incidents ({r})")
-
-
-def t_readwise():
-    save_credential("readwise", {"token": "t"})
-    def f(u, h, method="GET", body=None):
-        if "/v2/export" in u:
-            return res(200, {"results": [{"user_book_id": 10, "title": "Book", "author": "A",
-                "highlights": [{"text": "insight", "highlighted_at": "2026-01-01"}]}],
-                "nextPageCursor": None})
-        if "/v3/list" in u:
-            return res(403, {"detail": "no reader"})
-        return res(404, {})
-    with _store("readwise") as s:
-        r = readwise.sync(s, {}, settings={}, fetch=f)
-        ok(r["changed"] == ["book/10"], f"readwise book highlights ({r}); reader 403 tolerated")
-
-
-def t_figma():
-    save_credential("figma", {"token": "t"})
-    def f(u, h, method="GET", body=None):
-        if u.endswith("/comments"):
-            return res(200, {"comments": []})
-        if "/files/ABC" in u:
-            return res(200, {"name": "Design", "version": "7", "lastModified": "2026-01-01",
-                             "document": {"children": [{"type": "TEXT", "characters": "Hello"}]}})
-        return res(404, {})
-    with _store("figma") as s:
-        r = figma.sync(s, {"files": ["ABC"]}, settings={}, fetch=f)
-        ok(r["changed"] == ["file/ABC"], f"figma file text+comments ({r})")
-        ok("Hello" in s.get("figma", "file/ABC").body, "figma TEXT nodes collected")
-
-
-def t_airtable():
-    save_credential("airtable", {"token": "t"})
-    def f(u, h, method="GET", body=None):
-        if "/meta/bases/" in u:
-            return res(403, {})
-        return res(200, {"records": [{"id": "rec1", "createdTime": "2026-01-01",
-                                      "fields": {"Name": "Alpha"}}]})
-    with _store("airtable") as s:
-        r = airtable.sync(s, {"tables": ["appX/tblY"]}, settings={}, fetch=f)
-        ok(r["changed"] == ["appX/tblY/rec1"], f"airtable record ingested ({r})")
-
-
-def t_gsheets():
-    def f(u, h, method="GET", body=None):
-        if "/drive/v3/files/" in u:
-            return res(200, {"modifiedTime": "2026-01-01", "name": "Book"})
-        if "/values/" in u:
-            return res(200, {"values": [["h1", "h2"], ["a", "b"]]})
-        if "/spreadsheets/sid1" in u:
-            return res(200, {"properties": {"title": "Book"},
-                             "sheets": [{"properties": {"title": "Tab1", "sheetId": 0}}]})
-        return res(404, {})
-    with _store("gsheets") as s:
-        r = gsheets.sync(s, {"sheets": ["sid1"]}, settings={},
-                         token_fn=lambda force=False: "tok", fetch=f)
-        ok(r["changed"] == ["sid1/Tab1"], f"gsheets tab → markdown table ({r})")
-        ok("| a | b |" in s.get("gsheets", "sid1/Tab1").body, "gsheets renders a markdown table")
-
-
-def t_dropbox():
-    save_credential("dropbox", {"token": "t"})
-    def f(u, h, method="GET", body=None):
-        if u.endswith("/files/list_folder"):
-            return res(200, {"entries": [{".tag": "file", "id": "id:1", "name": "a.md",
-                "path_lower": "/f/a.md", "rev": "r1", "server_modified": "2026-01-01"}],
-                "has_more": False})
-        if u.endswith("/files/download"):
-            return res(200, "# dropbox body")
-        return res(404, {})
-    with _store("dropbox") as s:
-        r = dropbox.sync(s, {"folders": ["/f"]}, settings={}, fetch=f)
-        ok(r["changed"] == ["id:1"], f"dropbox markdown file ingested ({r})")
-
-
-def t_buckets():
-    class Fake:
-        def list(self, bucket, prefix):
-            yield buckets._Obj(key="pre/doc.md", revision="etag1")
-        def download(self, bucket, key):
-            return b"# hi from s3"
-    with _store("buckets") as s:
-        r = buckets.sync(s, {"buckets": ["s3://mybucket/pre"]}, settings={}, client=Fake())
-        ok(r["changed"] == ["s3://mybucket/pre/doc.md"], f"buckets object ingested ({r})")
-
-
-def t_web():
-    def f(u, h, method="GET", body=None):
-        return res(200, "<html><title>Hi</title><body><nav>skip</nav><p>hello world</p></body></html>",
-                   {"ETag": '"v1"'})
-    with _store("web") as s:
-        r = web.sync(s, {"pages": ["http://x/a"], "sitemaps": []}, settings={}, fetch=f)
-        ok(r["changed"] == ["http://x/a"], f"web page ingested ({r})")
-        ok("hello world" in s.get("web", "http://x/a").body and "skip" not in s.get("web", "http://x/a").body,
-           "web extract_readable drops nav chrome")
-        r2 = web.sync(s, {"pages": ["http://x/a"], "sitemaps": []}, settings={}, fetch=f)
-        ok(r2["changed"] == [], "web unchanged ETag is a no-op")
-
-
-def t_rss():
-    RSS = ("<rss><channel><item><guid>g1</guid><title>T</title><link>http://x/1</link>"
-           "<description>hi there</description><pubDate>2026-01-01</pubDate></item></channel></rss>")
-    with _store("rss") as s:
-        r = rss.sync(s, {"feeds": ["http://x/f"]}, settings={},
-                     fetch=lambda u, h, method="GET", body=None: res(200, RSS))
-        ok(r["changed"] == ["g1"] and r["removed"] == [], f"rss entry ingested, never prunes ({r})")
-
-
-def t_obsidian():
-    vault = Path(tempfile.mkdtemp(prefix="bean-vault-"))
-    (vault / "A.md").write_text("Note A links to [[B]].\n")
-    (vault / "B.md").write_text("Note B stands alone.\n")
-    with _store("obsidian") as s:
-        r = obsidian.sync(s, {"vaults": [str(vault)]}, settings={})
-        ok(len(r["changed"]) == 2, f"obsidian indexed both notes ({r})")
-        ok("Links: [[B]]" in s.get("obsidian", str(vault / "A.md")).body, "obsidian embeds wikilinks")
-        ok("Backlinks" in s.get("obsidian", str(vault / "B.md")).body, "obsidian computes backlinks")
-
-
-def t_sqldb():
-    import sqlite3
-    db = Path(tempfile.mkdtemp(prefix="bean-sql-")) / "notes.db"
-    con = sqlite3.connect(db)
-    con.execute("CREATE TABLE notes(id INTEGER, title TEXT, body TEXT, url TEXT)")
-    con.execute("INSERT INTO notes VALUES (1,'t1','refunds go through refundCard','u1')")
-    con.execute("INSERT INTO notes VALUES (2,'t2','b2','u2')")
-    con.commit(); con.close()
-    routed = sqldb.parse_add(f"sql:sqlite:///{db}|SELECT id,title,body,url FROM notes")
-    ok(routed and routed[0] == "queries", "sqldb parse_add returns a query dict")
-    with _store("sqldb") as s:
-        r = sqldb.sync(s, {"queries": [routed[1]]}, settings={})
-        ok(len(r["changed"]) == 2, f"sqldb indexed both rows ({r})")
-        ok("refundCard" in s.get("sqldb", "notes#1").body, "sqldb maps body column")
-
-
 for _name, _fn in [
-    ("confluence", t_confluence), ("jira", t_jira), ("linear", t_linear), ("asana", t_asana),
-    ("trello", t_trello), ("zendesk", t_zendesk), ("intercom", t_intercom), ("discord", t_discord),
-    ("gmail", t_gmail), ("microsoft", t_microsoft), ("coda", t_coda), ("salesforce", t_salesforce),
-    ("servicenow", t_servicenow), ("readwise", t_readwise), ("figma", t_figma), ("airtable", t_airtable),
-    ("gsheets", t_gsheets), ("dropbox", t_dropbox), ("buckets", t_buckets), ("web", t_web),
-    ("rss", t_rss), ("obsidian", t_obsidian), ("sqldb", t_sqldb),
+    ("confluence", t_confluence), ("jira", t_jira), ("zendesk", t_zendesk),
+    ("discord", t_discord), ("microsoft", t_microsoft), ("salesforce", t_salesforce),
 ]:
     check(_name, _fn)
 
 # == Onyx-parity connectors (offline) ===========================================================
 from bean import hubspot  # noqa: E402  (core)
-from bean.prototypes import (guru, gitbook, outline, slab, bookstack, document360, mediawiki,  # noqa: E402
-                             wikipedia, drupal_wiki, axero, discourse, xenforo, gitlab, bitbucket,
-                             clickup, productboard, testrail, canvas, freshdesk, gong, fireflies,
-                             highspot, loopio, zulip, egnyte, braintrust, google_site)
-from bean.prototypes import imap as imap_conn  # noqa: E402
-
-BIG = 3650000  # a "no lookback filtering" since_days for whole-collection windowed sources
-
-
-def t_guru():
-    save_credential("guru", {"user": "e", "token": "t"})
-    def f(u, h, method="GET", body=None):
-        return res(200, [{"id": "c1", "preferredPhrase": "Runbook", "slug": "abc",
-            "content": "<p>Restart worker.</p>", "lastModified": "2026-01-02",
-            "collection": {"name": "Eng"}, "owner": {"firstName": "A", "lastName": "B"}}])
-    with _store("guru") as s:
-        ok(guru.sync(s, {}, settings={}, fetch=f)["changed"] == ["c1"], "guru card ingested")
-
-
-def t_gitbook():
-    save_credential("gitbook", {"token": "t"})
-    def f(u, h, method="GET", body=None):
-        if u.endswith("/content"):
-            return res(200, {"pages": [{"id": "p1", "title": "Intro", "updatedAt": "2026-01-01",
-                                        "urls": {"app": "http://gb/p1"}}]})
-        return res(200, {"document": "Hello world markdown", "markdown": "Hello world markdown"})
-    with _store("gitbook") as s:
-        ok(gitbook.sync(s, {"spaces": ["sp1"]}, settings={}, fetch=f)["changed"] == ["sp1/p1"],
-           "gitbook page ingested")
-
-
-def t_outline():
-    save_credential("outline", {"token": "t", "url": "https://out"})
-    def f(u, h, method="GET", body=None):
-        return res(200, {"data": [{"id": "d1", "title": "Doc", "text": "body text",
-            "updatedAt": "2026-01-01", "url": "/doc/d1", "collectionId": "col1"}], "pagination": {}})
-    with _store("outline") as s:
-        ok(outline.sync(s, {}, settings={}, fetch=f)["changed"] == ["d1"], "outline doc ingested")
-
-
-def t_slab():
-    save_credential("slab", {"token": "t", "url": "https://org.slab.com"})
-    def f(u, h, method="GET", body=None):
-        b = json.loads(body) if isinstance(body, str) else (body or {})
-        if "organization" in b.get("query", ""):
-            return res(200, {"data": {"organization": {"posts": [
-                {"id": "p1", "title": "T", "updatedAt": "2026-01-01", "version": "5"}]}}})
-        return res(200, {"data": {"post": {"title": "T", "content": '[{"insert":"hello slab"}]',
-                                           "updatedAt": "2026-01-01", "version": "5"}}})
-    with _store("slab") as s:
-        ok(slab.sync(s, {}, settings={}, fetch=f)["changed"] == ["p1"], "slab post ingested")
-
-
-def t_bookstack():
-    save_credential("bookstack", {"url": "https://bs", "key": "i", "secret": "x", "id": "i"})
-    def f(u, h, method="GET", body=None):
-        if "/api/pages/" in u:
-            return res(200, {"name": "Page", "html": "<p>page body</p>", "slug": "page",
-                             "updated_at": "2026-01-01"})
-        return res(200, {"data": [{"id": "7", "name": "Page", "book_id": "3", "book_slug": "bk",
-                                   "slug": "page", "updated_at": "2026-01-01"}]})
-    with _store("bookstack") as s:
-        ok(bookstack.sync(s, {}, settings={}, fetch=f)["changed"] == ["page/7"], "bookstack page ingested")
-
-
-def t_document360():
-    save_credential("document360", {"token": "t"})
-    def f(u, h, method="GET", body=None):
-        if "/Articles/" in u or "/articles/" in u:
-            return res(200, {"data": {"id": "a1", "title": "Art", "html_content": "<p>article body</p>",
-                "modified_at": "2026-01-01", "url": "http://d/a1", "description": "desc"}})
-        if u.endswith("/categories") or "categories" in u:
-            return res(200, {"data": [{"name": "Cat", "articles": [{"id": "a1", "title": "Art"}],
-                                       "child_categories": []}]})
-        return res(200, {"data": [{"id": "v1", "version_code_name": "v1"}]})
-    with _store("document360") as s:
-        ok(document360.sync(s, {}, settings={}, fetch=f)["changed"] == ["article/a1"],
-           "document360 article ingested")
-
-
-def t_mediawiki():
-    save_credential("mediawiki", {"url": "http://w/api.php"})
-    def mw(u, h, method="GET", body=None):
-        if "categorymembers" in u:
-            return res(200, {"query": {"categorymembers": [{"pageid": 10, "title": "Alpha"}]}})
-        return res(200, {"query": {"pages": [{"pageid": 10, "title": "Alpha", "lastrevid": 99,
-                                              "extract": "hi", "fullurl": "http://w/Alpha"}]}})
-    with _store("mediawiki") as s:
-        ok(mediawiki.sync(s, {"categories": ["Foo"]}, settings={}, fetch=mw)["changed"] == ["10"],
-           "mediawiki page ingested")
-
-
-def t_wikipedia():
-    save_credential("wikipedia", {"language": "en", "url": "http://w/api.php"})
-    def mw(u, h, method="GET", body=None):
-        if "categorymembers" in u:
-            return res(200, {"query": {"categorymembers": [{"pageid": 10, "title": "Alpha"}]}})
-        return res(200, {"query": {"pages": [{"pageid": 10, "title": "Alpha", "lastrevid": 99,
-                                              "extract": "hi", "fullurl": "http://w/Alpha"}]}})
-    with _store("wikipedia") as s:
-        ok("10" in wikipedia.sync(s, {"pages": ["Alpha"]}, settings={}, fetch=mw)["changed"],
-           "wikipedia reuses mediawiki crawl")
-
-
-def t_drupalwiki():
-    save_credential("drupalwiki", {"url": "http://dw", "token": "t"})
-    def dw(u, h, method="GET", body=None):
-        if "/page/8" in u:
-            return res(200, {"id": 8, "title": "P", "body": "<p>w</p>", "lastModified": 1700000000})
-        if "/page" in u:
-            return res(200, {"content": [{"id": 8, "title": "P", "homeSpace": 3,
-                                          "lastModified": 1700000000}], "last": True})
-        return res(200, {"content": [], "last": True})
-    with _store("drupalwiki") as s:
-        ok(drupal_wiki.sync(s, {"spaces": ["3"]}, settings={}, fetch=dw, since_days=BIG)["changed"] == ["8"],
-           "drupalwiki page ingested")
-
-
-def t_axero():
-    save_credential("axero", {"url": "http://a", "key": "k"})
-    def ax(u, h, method="GET", body=None):
-        if "StartPage=1" in u or "start" in u.lower():
-            return res(200, {"TotalRecords": 1, "ResponseData": [{"ContentID": 42, "ContentTitle": "Doc",
-                "ContentURL": "/a/42", "ContentBody": "<p>b</p>", "DateUpdated": "2024-06-01T00:00:00"}]})
-        return res(200, {"TotalRecords": 1, "ResponseData": []})
-    with _store("axero") as s:
-        ok(axero.sync(s, {"spaces": ["1"]}, settings={}, fetch=ax, since_days=BIG)["changed"] == ["42"],
-           "axero content ingested")
-
-
-def t_discourse():
-    save_credential("discourse", {"url": "http://d", "token": "k", "email": "u"})
-    def dc(u, h, method="GET", body=None):
-        if "categories.json" in u:
-            return res(200, {"category_list": {"categories": [{"id": 5, "slug": "general"}]}})
-        if "/c/general/5.json" in u or ("/c/" in u and "5" in u):
-            return res(200, {"topic_list": {"topics": [{"id": 7, "slug": "hi",
-                                                        "bumped_at": "2024-06-01T00:00:00Z"}]}})
-        if "/t/7.json" in u:
-            return res(200, {"title": "Hi", "slug": "hi", "post_stream": {"posts": [
-                {"username": "b", "cooked": "<p>x</p>"}]}})
-        return res(200, {"topic_list": {"topics": []}})
-    with _store("discourse") as s:
-        ok(discourse.sync(s, {"categories": ["5"]}, settings={}, fetch=dc, since_days=BIG)["changed"] == ["topic/7"],
-           "discourse topic ingested")
-
-
-def t_xenforo():
-    save_credential("xenforo", {"url": "http://x", "key": "k"})
-    def xf(u, h, method="GET", body=None):
-        if "/api/threads/55" in u or "/threads/55/" in u:
-            return res(200, {"thread": {"thread_id": 55, "title": "T", "last_post_date": 1700000000},
-                "posts": [{"username": "a", "message_parsed": "<p>p</p>"}], "pagination": {"last_page": 1}})
-        if "/api/threads" in u or "/threads" in u:
-            return res(200, {"threads": [{"thread_id": 55, "title": "T", "last_post_date": 1700000000}],
-                             "pagination": {"last_page": 1}})
-        return res(200, {"threads": []})
-    with _store("xenforo") as s:
-        ok(xenforo.sync(s, {"forums": ["2"]}, settings={}, fetch=xf, since_days=BIG)["changed"] == ["thread/55"],
-           "xenforo thread ingested")
-
-
-def t_gitlab():
-    save_credential("gitlab", {"token": "t", "url": "https://gitlab.com"})
-    def f(u, h, method="GET", body=None):
-        if "/issues" in u:
-            return res(200, [{"iid": 7, "title": "Bug", "description": "x",
-                "updated_at": "2026-01-02T00:00:00Z", "web_url": "http://g/7",
-                "author": {"username": "ada"}, "state": "opened"}])
-        if "/notes" in u:
-            return res(200, [])
-        return res(200, [])
-    with _store("gitlab") as s:
-        ok(gitlab.sync(s, {"projects": ["g/p"], "include": ["issues"]}, settings={}, fetch=f)["changed"] == ["g/p#7"],
-           "gitlab issue ingested")
-
-
-def t_bitbucket():
-    save_credential("bitbucket", {"email": "e", "secret": "s"})
-    def f(u, h, method="GET", body=None):
-        if "/pullrequests" in u and "/comments" not in u:
-            return res(200, {"values": [{"id": 3, "title": "Add", "description": "d", "state": "OPEN",
-                "updated_on": "2026-01-02T00:00:00+00:00", "author": {"display_name": "Ada"},
-                "links": {"html": {"href": "http://b/3"}}}]})
-        return res(200, {"values": []})
-    with _store("bitbucket") as s:
-        ok(bitbucket.sync(s, {"repos": ["w/r"], "include": ["prs"]}, settings={}, fetch=f)["changed"] == ["w/r#3"],
-           "bitbucket PR ingested")
-
-
-def t_clickup():
-    save_credential("clickup", {"token": "pk"})
-    def f(u, h, method="GET", body=None):
-        if "/comment" in u:
-            return res(200, {"comments": []})
-        if "/task" in u:
-            return res(200, {"tasks": [{"id": "abc", "name": "Do it", "markdown_description": "go",
-                "date_updated": "1704153600000", "url": "http://c/abc", "status": {"status": "open"}}],
-                "last_page": True})
-        return res(200, {"tasks": [], "last_page": True})
-    with _store("clickup") as s:
-        ok(clickup.sync(s, {"lists": ["L"]}, settings={}, fetch=f)["changed"] == ["abc"],
-           "clickup task ingested")
-
-
-def t_productboard():
-    save_credential("productboard", {"token": "t"})
-    def f(u, h, method="GET", body=None):
-        if "/notes" in u:
-            return res(200, {"data": [{"id": "n1", "title": "Note", "content": "<p>hi</p>",
-                                       "updatedAt": "2026-01-01"}], "links": {}})
-        return res(200, {"data": [], "links": {}})
-    with _store("productboard") as s:
-        ok(productboard.sync(s, {"include": ["notes", "features"]}, settings={}, fetch=f)["changed"] == ["note/n1"],
-           "productboard note ingested")
-
-
-def t_testrail():
-    save_credential("testrail", {"url": "https://x.testrail.io", "email": "e", "token": "k"})
-    def f(u, h, method="GET", body=None):
-        if "get_cases" in u and "offset=0" in u.replace(" ", ""):
-            return res(200, {"cases": [{"id": 5, "title": "Login", "custom_steps": "click",
-                                        "custom_expected": "in", "updated_on": 1704153600}]})
-        if "get_cases" in u:
-            return res(200, {"cases": []})
-        if "get_suites" in u:
-            return res(200, [])
-        return res(200, {"sections": [], "runs": []})
-    with _store("testrail") as s:
-        ok(testrail.sync(s, {"projects": ["1"]}, settings={}, fetch=f)["changed"] == ["case/5"],
-           "testrail case ingested")
-
-
-def t_canvas():
-    save_credential("canvas", {"url": "https://school.instructure.com", "token": "t"})
-    def f(u, h, method="GET", body=None):
-        if "/pages" in u and "/pages/" not in u:
-            return res(200, [{"url": "intro", "title": "Intro", "body": "<p>welcome</p>",
-                              "updated_at": "2026-01-01T00:00:00Z", "page_id": 1}])
-        if u.rstrip("?").endswith("/courses/42") or "syllabus_body" in u:
-            return res(200, {"name": "C", "syllabus_body": "", "updated_at": "2026-01-01T00:00:00Z"})
-        return res(200, [])
-    with _store("canvas") as s:
-        ok(canvas.sync(s, {"courses": ["42"]}, settings={}, fetch=f)["changed"] == ["42/page/intro"],
-           "canvas page ingested")
-
-
-def t_freshdesk():
-    save_credential("freshdesk", {"subdomain": "acme", "key": "k"})
-    def f(u, h, method="GET", body=None):
-        if "/tickets/" in u and "/conversations" in u:
-            return res(200, [])
-        if "/tickets" in u:
-            return res(200, [{"id": 1, "subject": "Hi", "updated_at": "2026-01-01",
-                              "created_at": "2025-12-01", "description_text": "d", "description": "<p>d</p>"}])
-        return res(200, [])
-    with _store("freshdesk") as s:
-        ok(freshdesk.sync(s, {"include": ["tickets"]}, settings={}, fetch=f)["changed"] == ["ticket/1"],
-           "freshdesk ticket ingested")
 
 
 def t_hubspot():
@@ -1375,140 +888,12 @@ def t_hubspot():
            "hubspot ticket ingested")
 
 
-def t_gong():
-    save_credential("gong", {"key": "k", "secret": "s", "base": "https://api.gong.io"})
-    def f(u, h, method="GET", body=None):
-        if "/calls/transcript" in u:
-            return res(200, {"callTranscripts": [{"callId": "c1", "transcript": [
-                {"speakerId": "s1", "sentences": [{"text": "hi"}]}]}]})
-        if "/calls" in u:
-            return res(200, {"calls": [{"id": "c1", "title": "Call", "url": "u",
-                                        "created": "2026-01-03T00:00:00Z"}], "records": {}})
-        return res(200, {})
-    with _store("gong") as s:
-        ok(gong.sync(s, {}, settings={}, fetch=f)["changed"] == ["call/c1"], "gong call ingested")
-
-
-def t_fireflies():
-    save_credential("fireflies", {"token": "t"})
-    state = {"n": 0}
-    def f(u, h, method="GET", body=None):
-        state["n"] += 1
-        if state["n"] == 1:
-            return res(200, {"data": {"transcripts": [{"id": "m1", "title": "Mtg",
-                "date": 1700000000000, "sentences": [{"speaker_name": "A", "text": "hi"}],
-                "summary": {"overview": "ov"}}]}})
-        return res(200, {"data": {"transcripts": []}})
-    with _store("fireflies") as s:
-        ok(fireflies.sync(s, {}, settings={}, fetch=f)["changed"] == ["transcript/m1"],
-           "fireflies transcript ingested")
-
-
-def t_highspot():
-    save_credential("highspot", {"key": "k", "secret": "s", "base": "https://api-su2.highspot.com/v1.0"})
-    def f(u, h, method="GET", body=None):
-        if "/items/it1" in u:
-            return res(200, {"id": "it1", "title": "Deck", "description": "<p>d</p>",
-                             "date_updated": "2026-01-04"})
-        if "/items" in u:
-            return res(200, {"collection": [{"id": "it1"}]})
-        if "/spots" in u:
-            return res(200, {"collection": [{"id": "sp1", "title": "Sales"}]})
-        return res(200, {"collection": []})
-    with _store("highspot") as s:
-        ok(highspot.sync(s, {}, settings={}, fetch=f)["changed"] == ["item/it1"], "highspot item ingested")
-
-
-def t_loopio():
-    save_credential("loopio", {"key": "k", "secret": "s", "subdomain": "acme"})
-    def f(u, h, method="GET", body=None):
-        return res(200, {"totalPages": 1, "items": [{"id": 42, "questions": [{"text": "Q?"}],
-            "answer": {"text": "<p>A</p>"}, "location": {}, "lastUpdatedDate": "2026-01-05"}]})
-    with _store("loopio") as s:
-        r = loopio.sync(s, {}, settings={}, fetch=f, token_fn=lambda: "faketoken")
-        ok(r["changed"] == ["entry/42"], "loopio library entry ingested (token_fn injected)")
-
-
-def t_zulip():
-    save_credential("zulip", {"url": "https://x.zulipchat.com", "email": "b@x", "token": "t"})
-    mts = NOW - 2 * 86400
-    week = slack.iso_week(mts)
-    def f(u, h, method="GET", body=None):
-        if "subscriptions" in u:
-            return res(200, {"result": "success", "subscriptions": [{"name": "general"}]})
-        return res(200, {"result": "success", "found_oldest": True, "found_newest": True,
-            "messages": [{"id": 1, "timestamp": mts, "subject": "hi", "content": "hello team",
-                          "sender_full_name": "Al", "stream_id": 1, "display_recipient": "general"}]})
-    with _store("zulip") as s:
-        ok(zulip.sync(s, {"streams": ["general"]}, settings={}, fetch=f, now=NOW)["changed"] == [f"general/{week}"],
-           "zulip week digest ingested")
-
-
-def t_imap():
-    save_credential("imap", {"host": "h", "port": 993, "email": "e", "password": "p", "token": "p"})
-    class M:
-        def select(self, m, readonly=True):
-            return ("OK", None)
-        def uid(self, cmd, *a):
-            if cmd == "search":
-                return ("OK", [b"1"])
-            return ("OK", [(b'1 (INTERNALDATE "x")', b"From: a@b\r\nSubject: Hi\r\n\r\nBody")])
-        def logout(self):
-            pass
-    with _store("imap") as s:
-        r = imap_conn.sync(s, {"mailboxes": ["INBOX"]}, settings={}, imap_factory=lambda: M())
-        ok(r["changed"] == ["INBOX/1"], f"imap message ingested ({r})")
-
-
-def t_egnyte():
-    save_credential("egnyte", {"domain": "co", "subdomain": "co", "token": "t"})
-    def f(u, h, method="GET", body=None):
-        if "/fs/" in u:
-            return res(200, {"files": [{"name": "a.txt", "path": "/Shared/a.txt",
-                                        "last_modified": "2026-01-01T00:00:00Z",
-                                        "is_folder": False, "entry_id": "e1"}], "folders": []})
-        return res(200, "file body text")
-    with _store("egnyte") as s:
-        ok(egnyte.sync(s, {"folders": ["/Shared"]}, settings={}, fetch=f)["changed"] == ["/Shared/a.txt"],
-           "egnyte file ingested")
-
-
-def t_braintrust():
-    save_credential("braintrust", {"token": "t"})
-    def f(u, h, method="GET", body=None):
-        if "/prompt" in u:
-            return res(200, {"objects": [{"id": "p1", "name": "P", "_xact_id": "9",
-                "prompt_data": {"prompt": {"messages": [{"role": "user", "content": "hi"}]}}}]})
-        return res(200, {"objects": []})
-    with _store("braintrust") as s:
-        ok("prompt/p1" in braintrust.sync(s, {}, settings={}, fetch=f)["changed"],
-           "braintrust prompt ingested")
-
-
-def t_google_site():
-    def f(u, h, method="GET", body=None):
-        if u.endswith("/home"):
-            return res(200, '<title>Home</title><a href="/s/page2">p2</a><body>hi</body>', {"ETag": "v1"})
-        return res(200, '<title>P2</title><body>world</body>', {"ETag": "v2"})
-    with _store("gsite") as s:
-        out = google_site.sync(s, {"sites": ["https://sites.google.com/s/home"]}, settings={}, fetch=f)["changed"]
-        ok("https://sites.google.com/s/home" in out, "google_site base page ingested")
-
-
 for _name, _fn in [
-    ("guru", t_guru), ("gitbook", t_gitbook), ("outline", t_outline), ("slab", t_slab),
-    ("bookstack", t_bookstack), ("document360", t_document360), ("mediawiki", t_mediawiki),
-    ("wikipedia", t_wikipedia), ("drupalwiki", t_drupalwiki), ("axero", t_axero),
-    ("discourse", t_discourse), ("xenforo", t_xenforo), ("gitlab", t_gitlab),
-    ("bitbucket", t_bitbucket), ("clickup", t_clickup), ("productboard", t_productboard),
-    ("testrail", t_testrail), ("canvas", t_canvas), ("freshdesk", t_freshdesk), ("hubspot", t_hubspot),
-    ("gong", t_gong), ("fireflies", t_fireflies), ("highspot", t_highspot), ("loopio", t_loopio),
-    ("zulip", t_zulip), ("imap", t_imap), ("egnyte", t_egnyte), ("braintrust", t_braintrust),
-    ("google_site", t_google_site),
+    ("hubspot", t_hubspot),
 ]:
     check(_name, _fn)
 
-# == plugin system: core-only by default, enable a prototype, load a drop-in plugin =============
+# == plugin system: core-only by default, load a drop-in plugin =================================
 import bean.sources as _S  # noqa: E402
 from bean import config as _cfg  # noqa: E402
 from bean.plugins import discover_sources  # noqa: E402
@@ -1517,15 +902,6 @@ core_keys = {s.key for s in _S.CORE_SOURCES}
 ok(core_keys == {"slack", "gdocs", "notion", "github", "confluence", "jira", "zendesk",
                  "salesforce", "hubspot", "microsoft", "discord"}, "11 cloud core connectors")
 ok(_S.SOURCES[-1].key == "localfiles", "localfiles registered last (path catch-all)")
-ok("linear" not in {s.key for s in _S.SOURCES}, "prototypes are OFF by default")
-
-# enabling a prototype by name (as `bean plugins enable` / a written global config would)
-_cfg.save_global({"plugins": {"prototypes": ["linear", "web"]}})
-_S.reload_sources()
-keys = [s.key for s in _S.SOURCES]
-ok("linear" in keys and "web" in keys, "enabled prototypes join the registry")
-ok(keys[-1] == "localfiles", "localfiles still last after enabling prototypes")
-ok(_S.route_add("linear:ENG")[0].key == "linear", "enabled prototype routes")
 
 # a drop-in plugin file: a standalone module exposing SOURCE
 plugdir = Path(tempfile.mkdtemp(prefix="bean-plugins-"))
@@ -1548,7 +924,7 @@ plugdir = Path(tempfile.mkdtemp(prefix="bean-plugins-"))
 found = discover_sources(_S.Source, global_config={}, dirs=[plugdir])
 ok(len(found) == 1 and found[0].key == "acme", "drop-in plugin discovered from a dir")
 
-_cfg.save_global({"plugins": {"prototypes": [], "paths": [str(plugdir)]}})
+_cfg.save_global({"plugins": {"paths": [str(plugdir)]}})
 _S.reload_sources()
 ok(_S.route_add("acme:main") and _S.route_add("acme:main")[0].key == "acme", "drop-in plugin routes")
 acme_src = _S.BY_KEY["acme"]

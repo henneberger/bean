@@ -19,11 +19,14 @@ from .workspace import bean_home
 
 DEFAULTS: dict = {
     "embedding": {
-        # Any fastembed-supported model. Changing this needs a `bean reembed`; `bean status`
+        # Any fastembed-supported model. Changing this needs a `bean sync --rebuild`; `bean status`
         # warns when the index was built with a different model than this.
         "model": "BAAI/bge-small-en-v1.5",
         "batch_size": 64,
     },
+    # Global chunking defaults. Any source may override the whole block (or any leaf) with a
+    # `chunking` sub-block in its own config (see `slack` below) — `chunking_for(cfg, source)`
+    # merges the source's overrides over these. Changing chunking needs a `bean sync --rebuild`.
     "chunking": {
         "lines": 40,        # window height, in lines
         "overlap": 8,       # lines shared between adjacent windows
@@ -31,11 +34,11 @@ DEFAULTS: dict = {
         "min_chars": 40,    # windows shorter than this are dropped
         # Prepend the document title to each chunk's *embedded* text (stripped from the stored/
         # displayed text) so short or mid-document chunks still carry what the doc is about — a
-        # cheap recall win. Toggling needs a `bean reembed`.
+        # cheap recall win. Toggling needs a `bean sync --rebuild`.
         "title_prefix": True,
         # Also embed a coarse doc-level "large chunk" per `large_chunk_ratio` base chunks, so broad
         # "which doc is about X" questions match at a section granularity. Vector-only (kept out of
-        # the keyword/neighbour mirror). Needs a `bean reembed`.
+        # the keyword/neighbour mirror). Needs a `bean sync --rebuild`.
         "large_chunks": False,
         "large_chunk_ratio": 4,
     },
@@ -87,10 +90,13 @@ DEFAULTS: dict = {
     },
     # Lookback = the INITIAL backfill, chosen once at setup: how far back a source reaches on its
     # first sync. After that each source tracks the last message/change it saw (a cursor) and pulls
-    # only what's new from there — lookback is not re-applied per sync. `bean sync --full` ignores
+    # only what's new from there — lookback is not re-applied per sync. `bean sync --rebuild` ignores
     # the cursor and reaches back `--since` days. Set per source with `config set <source>.lookback_days N`.
     "slack": {
         "lookback_days": 14,  # first sync backfills this many days; later syncs continue from the cursor
+        # Chat is short and bursty — smaller windows than the global default keep a hit tight to the
+        # message that matched instead of dragging in a whole week digest. Overrides `chunking` above.
+        "chunking": {"lines": 15, "overlap": 3, "max_chars": 1000, "min_chars": 20},
     },
     "discord": {
         "lookback_days": 14,  # same initial backfill as Slack (shares the ISO-week digest math)
@@ -139,6 +145,12 @@ def resolve(ws=None) -> dict:
     return cfg
 
 
+def chunking_for(cfg: dict, source: str) -> dict:
+    """The effective chunking config for one source: the global `chunking` defaults with that
+    source's own `chunking` sub-block (e.g. `slack.chunking`) merged on top."""
+    return _merge(cfg.get("chunking") or {}, (cfg.get(source) or {}).get("chunking") or {})
+
+
 def get(cfg: dict, path: str, default=None):
     cur = cfg
     for part in path.split("."):
@@ -152,6 +164,10 @@ def set_in(cfg: dict, path: str, value) -> dict:
     """Set a dotted leaf, coercing value to the type of the existing default when there is one."""
     parts = path.split(".")
     ref = get(DEFAULTS, path, _MISSING)
+    # A per-source chunking override (e.g. `notion.chunking.lines`) has no baked-in default, so
+    # coerce it against the matching global `chunking` leaf instead.
+    if ref is _MISSING and len(parts) >= 2 and parts[-2] == "chunking":
+        ref = get(DEFAULTS, f"chunking.{parts[-1]}", _MISSING)
     if ref is not _MISSING and value is not None:
         value = _coerce(value, ref)
     cur = cfg

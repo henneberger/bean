@@ -14,7 +14,7 @@ help:
 	@echo "  make clean                remove build artifacts"
 
 venv:
-	python3 scripts/beanw.py status >/dev/null 2>&1 || python3 scripts/beanw.py --help >/dev/null
+	python3 scripts/bean.py status >/dev/null 2>&1 || python3 scripts/bean.py --help >/dev/null
 
 test:
 	$(PY) tests/test_bean.py

@@ -1,7 +1,8 @@
 """Chunking: fixed line windows with overlap, capped per chunk. Boring on purpose — stable
 chunk ids (doc_key#L<start>) mean an unchanged document re-embeds nothing. The window height,
-overlap, and size caps all come from config (`chunking.*`) so they can be tuned per workspace;
-changing them, like changing the embedding model, is a `bean reembed`."""
+overlap, and size caps all come from config (`chunking.*`, resolved per source by
+`config.chunking_for`) so they can be tuned per workspace and per source; applying a change to
+already-indexed docs is a `bean sync --rebuild`."""
 
 from __future__ import annotations
 

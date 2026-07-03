@@ -2,7 +2,7 @@
 """bean release helper — pure stdlib, no extra deps.
 
 bean ships two things from one repo: the `bean` Python package (pyproject/hatchling) and the Claude
-Code plugin (`.claude-plugin/plugin.json` + `skills/` + `scripts/beanw.py`). A release keeps their
+Code plugin (`.claude-plugin/plugin.json` + `skills/` + `scripts/bean.py`). A release keeps their
 versions in lockstep, proves the offline test suite is green, builds the wheel/sdist, and tags git.
 
   python3 scripts/release.py version              # print the current version

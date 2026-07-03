@@ -3,7 +3,7 @@
 
 Ensures a virtualenv at <plugin>/.venv with bean's dependencies installed (first run only,
 stamped by pyproject.toml's mtime so dependency changes reinstall), then runs `bean` inside
-it with the given arguments. Pure stdlib, so `python3 scripts/beanw.py …` always works.
+it with the given arguments. Pure stdlib, so `python3 scripts/bean.py …` always works.
 """
 
 from __future__ import annotations

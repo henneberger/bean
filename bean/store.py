@@ -33,7 +33,7 @@ CREATE TABLE IF NOT EXISTS revisions (
 -- No chunk table here: chunks live once in Lance. The keyword / neighbour / merge queries below run
 -- as DuckDB SQL directly over the Lance dataset (register + query), so there is a single copy of the
 -- chunk data and DuckDB stays the relational engine. Chunk `ord` is derived on the fly from line
--- order (large coarse chunks, id '…-large', are excluded), so no reembed is needed to adopt this.
+-- order (large coarse chunks, id '…-large', are excluded), so no rebuild is needed to adopt this.
 CREATE TABLE IF NOT EXISTS state (key TEXT PRIMARY KEY, value TEXT);
 -- Lightweight relationship index: edges derived at sync time from source-native metadata
 -- (authored_by → a person, in-container → a repo/project/channel, links-to → another doc). No LLM;

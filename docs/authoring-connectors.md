@@ -5,23 +5,20 @@
 > slash command.
 
 A connector is **one Python module** exposing four callables and a `SOURCE`. Drop it in
-`~/.bean/plugins/` and it's live — no core edits. bean ships 12 core connectors; ~45 more live in
-`bean/prototypes/` as worked examples you can read or copy. Your job: write the module, test it
-offline, install it.
+`~/.bean/plugins/` and it's live — no core edits. bean ships 12 core connectors in `bean/` as worked
+examples you can read or copy. Your job: write the module, test it offline, install it.
 
-**Before writing, read 1–2 prototypes whose shape matches:**
+**Before writing, read 1–2 core connectors whose shape matches:**
 
 | Source shape | Read | Notes |
 |---|---|---|
-| REST list + item + comments | `bean/prototypes/{linear,asana,gitlab}.py` | issues/tasks/cards → one doc each |
-| Wiki / KB (HTML bodies) | `bean/prototypes/{guru,bookstack}.py`, `bean/confluence.py` | `html_to_text` the body |
-| Whole-collection (index everything) | `bean/prototypes/{servicenow,intercom}.py` | `always_when_connected`, never prune |
-| Chat (per-week digests) | `bean/prototypes/zulip.py`, `bean/discord.py` | reuse `bean.slack.iso_week` / `week_start` |
-| GraphQL / POST API | `bean/prototypes/{slab,fireflies,linear}.py` | `api_json_post` |
-| Files (office/pdf) | `bean/prototypes/{dropbox,buckets}.py` | temp-file → `extract_office`/`extract_pdf` |
-| Rows / tables | `bean/prototypes/{sqldb,airtable}.py` | render fields as `key: value` |
-| CLI/OAuth-minted token | `bean/prototypes/gmail.py`, `bean/microsoft.py` | injectable `token_fn=` for offline tests |
-| No-auth fetch | `bean/prototypes/{web,rss}.py` | `auth=None`, no `connect` |
+| REST list + item + comments | `bean/jira.py`, `bean/zendesk.py` | issues/tickets → one doc each |
+| Wiki / KB (HTML bodies) | `bean/confluence.py`, `bean/hubspot.py` | `html_to_text` the body |
+| Whole-collection (index everything) | `bean/salesforce.py`, `bean/hubspot.py` | `always_when_connected`, never prune |
+| Chat (per-week digests) | `bean/discord.py`, `bean/slack.py` | reuse `bean.slack.iso_week` / `week_start` |
+| Files (office/pdf) | `bean/gdocs.py`, `bean/localfiles.py` | temp-file → `extract_office`/`extract_pdf` |
+| CLI/OAuth-minted token | `bean/microsoft.py`, `bean/gdocs.py` | injectable `token_fn=` for offline tests |
+| No-auth fetch | `bean/localfiles.py` | `auth=None`, no `connect` |
 
 ## The contract
 
@@ -73,7 +70,7 @@ from bean.sources import Source
 ## Write it — start from the template
 
 Copy [`docs/connector-template.py`](connector-template.py) to `~/.bean/plugins/<name>.py` and fill it in. Or copy a
-matching prototype. Keep it self-contained.
+matching core connector from `bean/`. Keep it self-contained.
 
 ## Test it offline (do this before installing)
 
@@ -108,12 +105,11 @@ and POST connectors.
 1. `mkdir -p ~/.bean/plugins && cp <name>.py ~/.bean/plugins/` — anything there with a `SOURCE` (or
    `SOURCES` list, or `register()`) loads automatically.
 2. Verify: `bean plugins list` shows it under drop-in plugins; `bean init` lists it.
-3. Set it up (`bean auth <name> …` or write the cred file — see the main bean skill), then
-   `bean add <ref>` (or write config), `bean sync`, `bean search`.
+3. Set it up (`bean auth <name> …` or write the cred file — see the main bean skill), then write
+   the ref into the source's config lists, `bean sync`, `bean search`.
 
-To instead turn on a bundled prototype (Linear, GitLab, Zendesk-articles, …): `bean plugins enable
-<name>` — no file needed. Promote a prototype to core by moving its module into `bean/` and adding a
-row to `CORE_SOURCES` in `bean/sources.py`.
+Promote a plugin to core by moving its module into `bean/` and adding a row to `CORE_SOURCES` in
+`bean/sources.py`.
 
 ## Common mistakes
 

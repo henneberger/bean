@@ -134,7 +134,7 @@ def sync(store: Store, config: dict, *, token_fn=access_token, fetch=None,
     auto = not config.get("docs") and not config.get("folders")
     if auto:
         # Smart lookback: after the first sync we remember the newest modifiedTime we saw and only
-        # discover files changed since (the cursor). The first sync (or --full) has no cursor, so it
+        # discover files changed since (the cursor). The first sync (or --rebuild) has no cursor, so it
         # reaches back `lookback_days`. Already-indexed files are re-stat'd below regardless, so edits
         # to known files are never missed — the window only bounds discovery of *new* files.
         cursor = None if full else store.get_state("gdocs.cursor")

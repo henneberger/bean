@@ -2,7 +2,7 @@
 
 The model is chosen by config (`embedding.model`), never an environment variable, and its
 weights download automatically the first time an embedding is actually computed — on the first
-`sync`/`search`/`reembed`, not at setup. Models are cached per name, so `bean reembed` can move
+`sync`/`search`, not at setup. Models are cached per name, so `bean sync --rebuild` can move
 the index onto a different model without a process restart. Everything downstream takes an
 injectable embed function, so tests run with a deterministic fake and never touch a model."""
 
@@ -19,7 +19,7 @@ def _load(model_name: str):
 
 
 def embedder(model_name: str, batch_size: int = 64):
-    """A (texts -> vectors) callable bound to one model — what sync/reembed pass around."""
+    """A (texts -> vectors) callable bound to one model — what sync passes around."""
     def embed(texts: list[str]) -> list[list[float]]:
         model = _load(model_name)
         return [list(map(float, v)) for v in model.embed(texts, batch_size=batch_size)]

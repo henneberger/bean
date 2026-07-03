@@ -3,7 +3,7 @@ of the guilds/channels you track. Like Slack, the message stream is cut into per
 digest documents (`<channel_name>/<YYYY-Www>`) so units stay stable as history grows. Each channel
 is paginated backwards by message-id snowflake down to a floor: the initial backfill (`lookback_days`,
 default 14) on the first sync, then the per-channel cursor after that (snapped to the ISO-week start
-so digests re-render from complete weeks); `--full` reaches back `since_days`. Reuses slack's
+so digests re-render from complete weeks); `--rebuild` reaches back `since_days`. Reuses slack's
 ISO-week math. Weekly digests never prune."""
 
 from __future__ import annotations
@@ -127,7 +127,7 @@ def sync(store: Store, config: dict, *, settings: dict | None = None, fetch=None
     for cid, name in channels.items():
         cursor = store.get_state(f"discord.cursor.{cid}", 0)
         # Lookback is the initial backfill (first sync only); after that continue from the cursor.
-        # `--full` ignores the cursor and reaches back since_days. (Shares Slack's window semantics.)
+        # `--rebuild` ignores the cursor and reaches back since_days. (Shares Slack's window semantics.)
         if full:
             floor = now - since_days * DAY
         elif cursor:

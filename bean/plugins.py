@@ -1,17 +1,13 @@
 """Plugin discovery: how a connector that isn't in the core set becomes live.
 
-Two ways in, both resolved by `discover_sources` and appended to the registry after the core
-connectors (but before `localfiles`, which stays the path catch-all):
+Drop-in plugins are resolved by `discover_sources` and appended to the registry after the core
+connectors (but before `localfiles`, which stays the path catch-all): every `*.py` under a plugin
+dir (default `~/.bean/plugins/`, plus any paths in `plugins.paths`). A plugin module exposes ONE
+of: a `SOURCE` (a Source), a `SOURCES` list, or a `register() -> Source | list[Source]`. It builds
+those with `from bean.sources import Source` and calls the same `bean.http`/`bean.store` helpers the
+bundled connectors do. See `docs/authoring-connectors.md` for the authoring guide + template.
 
-  1. **Enabled prototypes** — names listed in the global config under `plugins.prototypes`
-     (e.g. `["linear", "gitlab"]`). Each is looked up in `bean/prototypes/registry.py`.
-  2. **Drop-in plugins** — every `*.py` under a plugin dir (default `~/.bean/plugins/`, plus any
-     paths in `plugins.paths`). A plugin module exposes ONE of: a `SOURCE` (a Source), a `SOURCES`
-     list, or a `register() -> Source | list[Source]`. It builds those with
-     `from bean.sources import Source` and calls the same `bean.http`/`bean.store` helpers the
-     bundled connectors do. See `docs/authoring-connectors.md` for the authoring guide + template.
-
-A broken prototype name or plugin file is logged and skipped — it never takes down the registry."""
+A broken plugin file is logged and skipped — it never takes down the registry."""
 
 from __future__ import annotations
 
@@ -60,28 +56,15 @@ def _load_plugin_file(path: Path, Source) -> list:
         return []
 
 
-def discover_sources(Source, *, global_config=None, dirs=None, prototypes=None) -> list:
-    """Sources contributed by enabled prototypes + drop-in plugin files. `Source` is passed in to
-    avoid an import cycle with sources.py."""
+def discover_sources(Source, *, global_config=None, dirs=None) -> list:
+    """Sources contributed by drop-in plugin files. `Source` is passed in to avoid an import cycle
+    with sources.py."""
     if global_config is None:
         from . import config as cfgmod
         global_config = cfgmod.load_global()
     out: list = []
 
-    # 1. prototypes enabled by name
-    names = prototypes if prototypes is not None else \
-        ((global_config.get("plugins") or {}).get("prototypes") or [])
-    if names:
-        from .prototypes import registry
-        available = registry.build(Source)
-        for n in names:
-            src = available.get(n)
-            if src is None:
-                _warn(f"unknown prototype {n!r} (see `bean plugins list`)")
-            else:
-                out.append(src)
-
-    # 2. drop-in plugin files
+    # drop-in plugin files
     seen: set = set()
     for d in (dirs if dirs is not None else plugin_dirs(global_config)):
         d = Path(d)

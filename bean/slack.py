@@ -3,7 +3,7 @@ as their own sections) so units stay stable as history grows. `lookback_days` (d
 the initial backfill: the first sync of a channel reaches back that far. After that each sync
 continues from the last message it saw (a per-channel cursor in the workspace state table),
 re-rendering the in-progress week so same-week edits land; edits to older weeks are missed by
-design (`--full` re-fetches everything within since_days)."""
+design (`--rebuild` re-fetches everything within since_days)."""
 
 from __future__ import annotations
 
@@ -149,7 +149,7 @@ def sync(store: Store, config: dict, *, token: str, team_url: str | None = None,
         # Lookback is the initial backfill only: the first sync reaches back `lookback` days. After
         # that we continue from the last message we saw (cursor), snapped to its ISO-week start so
         # the in-progress week always re-renders from complete data (catching same-week edits). A
-        # `--full` sync ignores the cursor and reaches back `since_days`.
+        # `--rebuild` sync ignores the cursor and reaches back `since_days`.
         if full:
             floor = now - since_days * DAY
         elif cursor:

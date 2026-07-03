@@ -2,11 +2,10 @@
 config lives, whether it needs auth, how `bean add` routes a reference to it, and one `sync()`
 callable with the same signature — so `sync.py` and the CLI never special-case a provider.
 
-bean ships a small, verified **core** set. Everything else is a prototype (see `bean/prototypes/`)
-or a user plugin (a drop-in module under ~/.bean/plugins/), discovered at import by `plugins.py`.
-`localfiles` is always registered LAST so it stays the path catch-all. Adding a connector is: write
-its module, then either append a core row here, enable a prototype by name, or ship a plugin — see
-`docs/authoring-connectors.md`."""
+bean ships a small, verified **core** set. Everything else is a user plugin (a drop-in module under
+~/.bean/plugins/), discovered at import by `plugins.py`. `localfiles` is always registered LAST so it
+stays the path catch-all. Adding a connector is: write its module, then either append a core row here
+or ship a plugin — see `docs/authoring-connectors.md`."""
 
 from __future__ import annotations
 
@@ -143,14 +142,14 @@ CORE_SOURCES: list[Source] = [
            connect=discord.connect, connected=discord.connected),
 ]
 
-# Always LAST — the path catch-all. Kept out of CORE_SOURCES so discovered plugins/prototypes
-# (which may claim bare URLs, e.g. the `web` prototype) still route before the filesystem fallback.
+# Always LAST — the path catch-all. Kept out of CORE_SOURCES so discovered drop-in plugins
+# (which may claim bare URLs) still route before the filesystem fallback.
 LOCALFILES = Source("localfiles", "localfiles", "Local files", ("paths",), localfiles.sync,
                     localfiles.parse_add, auth=None, add_help="a file or folder path")
 
 
 def build_sources() -> list[Source]:
-    """Core cloud connectors + discovered plugins/enabled prototypes, then localfiles last."""
+    """Core cloud connectors + discovered drop-in plugins, then localfiles last."""
     from .plugins import discover_sources  # lazy: avoids an import cycle with the registry
     return CORE_SOURCES + discover_sources(Source) + [LOCALFILES]
 
@@ -161,8 +160,7 @@ BY_CONFIG_KEY = {s.config_key: s for s in SOURCES}
 
 
 def reload_sources() -> None:
-    """Rebuild the registry after enabling a prototype or dropping in a plugin (used by tests and
-    after `bean config set plugins.prototypes …`)."""
+    """Rebuild the registry after dropping in a plugin (used by tests)."""
     global SOURCES, BY_KEY, BY_CONFIG_KEY
     SOURCES = build_sources()
     BY_KEY = {s.key: s for s in SOURCES}
