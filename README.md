@@ -29,8 +29,8 @@ commands one at a time (the marketplace add takes a full clone URL, not an `owne
 
 `/bean` is not one search. Claude picks from a toolbox (hybrid `search`, `recent`, whole-`thread`
 or `doc` pull, graph `related`, `neighbors`) and composes them. Ask *"I had a convo in the product
-channel, what's the impact on my docs?"* and it grabs the recent Slack conversation, pulls the
-topics out, then searches your Google Docs for what those topics touch.
+channel, what's the impact on my docs?"* and it grabs the recent Slack conversation and pulls the
+topics out. Then it searches your Google Docs for what those topics touch.
 
 ## Try asking
 
@@ -67,8 +67,8 @@ bean ships **10 core connectors**, always on:
 | **Discord** | bot token | channels, cut into per-week digests like Slack |
 | **Local files** | none | a folder (crawled recursively) or file — Markdown/text, office docs (**Word**, OpenDocument, RTF, **PowerPoint**, **Excel**), **HTML**, and **PDF** |
 
-Where a service offers more than one way in, bean supports both and prefers the path an individual
-can set up without an admin (Atlassian Cloud tokens or Server PATs; Microsoft device-code or `az`).
+Where a service offers more than one way in, bean supports both. It prefers the path an individual
+can set up without an admin: Atlassian Cloud tokens or Server PATs, Microsoft device-code or `az`.
 
 ### More connectors: drop-in plugins
 
@@ -182,11 +182,11 @@ extractor and honor the `ocr.backend` setting below. Born-digital PDFs use embed
 base dependency). For scans, handwriting, or complex layouts, set `ocr.backend` to `unlimited-ocr` and
 bean runs pages through [baidu/Unlimited-OCR](https://github.com/baidu/Unlimited-OCR), a
 vision-language OCR model. You install nothing: bean provisions the OCR toolchain (torch,
-transformers) into its own venv the first time OCR runs, the same way the embedding model
-downloads itself on first use, and runs on CUDA, Apple MPS, or CPU, whichever the machine has.
-The default `auto` backend takes embedded text where it exists and OCRs only the pages that have
-none. OCR stays opt-in because it's slow: Unlimited-OCR is high quality but ~40s/page on CPU, far
-too slow to run by default, so born-digital text (pymupdf) is the fast default path.
+transformers) into its own venv the first time OCR runs, the same way the embedding model downloads
+itself. It runs on CUDA, Apple MPS, or CPU, whichever the machine has. The default `auto` backend
+takes embedded text where it exists and OCRs only the pages that have none. OCR stays opt-in because
+it's slow: Unlimited-OCR is high quality but ~40s/page on CPU. Born-digital text (pymupdf) is the
+fast default path.
 
 ## Indexing speed
 
@@ -214,12 +214,12 @@ above: the embedding model ~30 MB, and the OCR model ~6 GB the first time you en
   checkpoints per document (oldest first), so an interrupted run picks up where it left off without
   re-embedding what's done or skipping anything.
 - **Storage.** One DuckDB catalog per workspace holds document snapshots, revision history, sync
-  cursors, and the relationship edges; a Lance table alongside it holds the chunks (text + vectors)
-  as the single copy. There is no chunk mirror: keyword search, neighbours, and section-merge run
-  as DuckDB SQL **directly over the Lance dataset** (register + query), so DuckDB stays the
-  relational engine while chunk data lives once. Workspaces live at `~/.bean/<repo-name>-<hash>/`
+  cursors, and the relationship edges. A Lance table alongside it holds the chunks (text + vectors)
+  as the single copy. Nothing mirrors that chunk data: keyword search, neighbours, and section-merge
+  run as DuckDB SQL **directly over the Lance dataset** (register + query). DuckDB stays the
+  relational engine; the chunks live once. Workspaces live at `~/.bean/<repo-name>-<hash>/`
   (global connectors share `~/.bean/_global/`). Credentials follow scope: a **global** connector's
-  is shared at `~/.bean/credentials/`; a **local** connector's lives in that repo's workspace (so a
+  is shared at `~/.bean/credentials/`. A **local** connector's lives in that repo's workspace (so a
   different GitHub token per project works), with the shared dir as a fallback. All mode 0600,
   never inside a repo. `bean sql "SELECT …"` runs read-only queries (SELECT/WITH) straight over this
   store (tables `documents`, `edges`, `state`, and the Lance `_chunks` dataset) for structured
