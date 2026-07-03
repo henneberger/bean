@@ -549,6 +549,33 @@ ok(bool(first_chunk), "find_docs returns documents")
 re_res = reembed(hws, embed_fn=fake_embed)
 ok(re_res["docs"] == 2 and re_res["chunks"] >= 2, "--rebuild re-embeds every stored doc")
 
+# -- sync checkpointing: an interrupted embed resumes without losing docs ------------------------
+ckws = Workspace(repo("checkpoint"))
+with Store(ckws) as s:
+    s.upsert("gdocs", "a", title="A", url=None, revision_id="1", body="alpha body content that is definitely long enough to be chunked and embedded here", meta={"modified_at": "2026-01-01T00:00:00Z"})
+    s.upsert("gdocs", "b", title="B", url=None, revision_id="1", body="beta body content that is definitely long enough to be chunked and embedded here", meta={"modified_at": "2026-02-01T00:00:00Z"})
+    s.upsert("gdocs", "c", title="C", url=None, revision_id="1", body="gamma body content that is definitely long enough to be chunked and embedded here", meta={"modified_at": "2026-03-01T00:00:00Z"})
+    ok([d for _, d in s.embed_queue()] == ["a", "b", "c"], "embed queue lists unembedded docs oldest-first")
+_boom = {"n": 0}
+def flaky_embed(texts):
+    _boom["n"] += 1
+    if _boom["n"] == 2:  # blow up while embedding the 2nd doc, mid-sync
+        raise RuntimeError("interrupted")
+    return fake_embed(texts)
+try:
+    run_sync(ckws, refetch=False, embed_fn=flaky_embed)
+    ok(False, "interrupted embed should propagate")
+except RuntimeError:
+    ok(True, "an embed failure interrupts the sync")
+with Store(ckws) as s:
+    remaining = [d for _, d in s.embed_queue()]
+ok("a" not in remaining and "b" in remaining, "docs before the interruption are checkpointed; the rest stay queued")
+run_sync(ckws, refetch=False, embed_fn=fake_embed)  # resume — finishes what was left
+with Store(ckws) as s:
+    ok(s.embed_queue() == [], "resuming the sync drains the embed queue")
+    s.upsert("gdocs", "a", title="A", url=None, revision_id="2", body="alpha EDITED body content that is definitely long enough to be chunked here", meta={"modified_at": "2026-01-01T00:00:00Z"})
+    ok([d for _, d in s.embed_queue()] == ["a"], "an edited doc re-enters the queue; unchanged docs stay done")
+
 # == retrieval upgrades: weighted RRF, routing, recency, merge, enrichment, large chunks, rerank ==
 from bean.search import related as _related, _merge_sections, _query_weights  # noqa: E402
 from bean import graph as _graph  # noqa: E402

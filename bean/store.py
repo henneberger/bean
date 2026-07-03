@@ -71,8 +71,11 @@ class Store:
         self.con = duckdb.connect(str(ws.db_path))
         self.con.execute(SCHEMA)
         # Migrate DBs created before the metadata columns existed (CREATE IF NOT EXISTS won't add them).
+        # `embedded_hash` is the sync checkpoint: it holds the content hash whose chunks are actually
+        # in Lance, so a doc still needs embedding whenever embedded_hash != hash (or is NULL) — which
+        # survives an interrupted sync and lets it resume without re-embedding what's already done.
         for col, typ in (("created_at", "TIMESTAMP"), ("modified_at", "TIMESTAMP"),
-                         ("author", "TEXT"), ("mime", "TEXT")):
+                         ("author", "TEXT"), ("mime", "TEXT"), ("embedded_hash", "TEXT")):
             self.con.execute(f"ALTER TABLE documents ADD COLUMN IF NOT EXISTS {col} {typ}")
 
     def close(self):
@@ -152,6 +155,30 @@ class Store:
     def doc_ids(self, source: str) -> list[str]:
         return [r[0] for r in self.con.execute(
             "SELECT doc_id FROM documents WHERE source=? ORDER BY doc_id", [source]).fetchall()]
+
+    # -- embed checkpoint (sync resumability) ----------------------------------------------------
+    def embed_queue(self, sources=None, *, force: bool = False) -> list[tuple[str, str]]:
+        """(source, doc_id) pairs that still need embedding, OLDEST FIRST (by the doc's own
+        timestamp) so a checkpoint means 'everything older is done'. `force` (a --rebuild) returns
+        every doc; otherwise only docs whose embedded chunks are missing or stale (embedded_hash !=
+        hash) — which naturally includes anything an interrupted sync left half-done."""
+        where = ["1=1"]
+        params: list = []
+        if sources is not None:
+            marks = ",".join("?" * len(sources)) or "NULL"
+            where.append(f"source IN ({marks})")
+            params += list(sources)
+        if not force:
+            where.append("(embedded_hash IS NULL OR embedded_hash <> hash)")
+        return [(r[0], r[1]) for r in self.con.execute(
+            f"SELECT source, doc_id FROM documents WHERE {' AND '.join(where)} "
+            "ORDER BY COALESCE(modified_at, fetched_at) ASC, doc_id ASC", params).fetchall()]
+
+    def mark_embedded(self, source: str, doc_id: str) -> None:
+        """Checkpoint one doc: its current content is now embedded in Lance. Autocommitted, so an
+        interrupted sync resumes from exactly here."""
+        self.con.execute(
+            "UPDATE documents SET embedded_hash = hash WHERE source=? AND doc_id=?", [source, doc_id])
 
     def counts(self) -> dict[str, int]:
         return dict(self.con.execute(

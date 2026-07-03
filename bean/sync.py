@@ -88,22 +88,24 @@ def run_sync(ws: Workspace, *, only: str | None = None, keys: set | None = None,
             changed += [(src.key, d) for d in r.get("changed", [])]
             removed += [(src.key, d) for d in r.get("removed", [])]
 
-        # A plain sync re-embeds only changed docs; a --rebuild re-embeds every stored doc in the
-        # synced sources so a chunking/model change reaches the whole index (this absorbs the old
-        # `reembed` command). Deduped, and only for sources actually in scope this run.
-        def _in_scope(src_key: str) -> bool:
-            return (not only or only == src_key) and (keys is None or src_key in keys)
-
-        if full:
-            embed_targets = [(s, d) for s in store.counts() if _in_scope(s)
-                             for d in store.doc_ids(s)]
+        # The embed queue comes from the STORE, not just this run's `changed`: any doc whose
+        # embedded chunks are missing or stale (embedded_hash != hash) is (re)embedded — so a sync
+        # interrupted mid-embed resumes cleanly instead of silently leaving docs unindexed. `--full`
+        # forces the whole set (absorbing the old `reembed`). Oldest first, and each doc is
+        # checkpointed the moment its vectors land, so progress is durable every step of the way.
+        if only is not None:
+            scope = {only} if (keys is None or only in keys) else set()
+        elif keys is not None:
+            scope = set(keys)
         else:
-            embed_targets = list(dict.fromkeys(changed))
+            scope = None
+        embed_targets = store.embed_queue(scope, force=full)
 
         chunks_indexed = 0
         for source, doc_id in embed_targets:
             chunks_indexed += _embed_rows(ws, store, source, doc_id, embed_fn,
                                           cfgmod.chunking_for(settings, source))
+            store.mark_embedded(source, doc_id)  # durable checkpoint — resume-safe if interrupted
             log(f"indexed {source}/{doc_id}")
         for source, doc_id in removed:
             delete_doc(ws, source, doc_id)
