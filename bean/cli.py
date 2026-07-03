@@ -10,6 +10,7 @@ from a terminal; the plugin calls these subcommands to retrieve context).
   bean doc <ref> [--source S]                 Full document body
   bean neighbors <chunk-id> [--radius N]
   bean config [get PATH | set PATH VALUE | list]
+  bean sql "SELECT …"             Read-only SQL over the store (no query = print the schema)
   bean status
 
 Tracked refs (docs/channels/pages/repos/paths) are written straight into a source's config lists —
@@ -413,6 +414,84 @@ def cmd_config(ws: Workspace, args) -> int:
     return 2
 
 
+# -- sql ----------------------------------------------------------------------------------------
+_SQL_SCHEMA = """bean keeps everything in a per-workspace DuckDB. Query it READ-ONLY:
+  bean sql "SELECT ..."        (only SELECT / WITH)      add --global for the shared cross-repo store
+
+TABLES
+  documents(source, doc_id, title, url, revision_id, hash, body,
+            created_at, modified_at, author, mime, fetched_at, embedded_hash)
+      one row per indexed document. created_at/modified_at are the doc's OWN timestamps at the
+      source; `author` is source-native. A Google Doc comment is its own row: doc_id
+      '<fileId>#comment:<id>', author = the commenter, modified_at = last activity.
+  edges(source, src_doc, rel, dst_kind, dst)
+      derived links. rel ∈ {authored_by, in_repo, in_project, in_channel}; dst_kind ∈
+      {person, container}.
+  state(key, value)                internal sync cursors / checkpoints.
+  _chunks(id, source, doc_id, title, url, start, "end", text, vector)
+      embedded chunks (registered from Lance on demand; "end" is reserved — quote it; ids ending
+      '-large' are coarse doc-level chunks).
+
+EXAMPLES
+  bean sql "SELECT author, count(*) n FROM documents GROUP BY author ORDER BY n DESC LIMIT 10"
+  bean sql "SELECT title, modified_at FROM documents WHERE doc_id LIKE '%#comment:%'
+            AND author ILIKE '%eric%' ORDER BY modified_at DESC LIMIT 5"
+"""
+
+
+def cmd_sql(ws: Workspace, args) -> int:
+    query = " ".join(args.query).strip()
+    if not query:
+        print(_SQL_SCHEMA)
+        return 0
+    head = query.lower().lstrip("( \t")
+    if not (head.startswith("select") or head.startswith("with")):
+        print("bean sql runs read-only queries only (SELECT / WITH).", file=sys.stderr)
+        return 2
+    target = Workspace.global_() if args.global_ else ws
+    if not target.db_path.exists():
+        print("Nothing indexed yet — run `bean sync`.", file=sys.stderr)
+        return 1
+    import duckdb
+    con = duckdb.connect(str(target.db_path), read_only=True)
+    try:
+        from .index import chunks_dataset
+        ds = chunks_dataset(target)
+        if ds is not None:
+            con.register("_chunks", ds)
+        try:
+            cur = con.execute(query)
+            cols = [d[0] for d in cur.description]
+            rows = cur.fetchall()
+        except Exception as err:  # a bad query is the user's, not a crash
+            print(f"SQL error: {err}", file=sys.stderr)
+            return 1
+    finally:
+        con.close()
+    _print_table(cols, rows)
+    return 0
+
+
+def _print_table(cols: list[str], rows: list) -> int:
+    if not rows:
+        print("(no rows)")
+        return 0
+
+    def cell(v) -> str:
+        s = "" if v is None else str(v).replace("\n", " ")
+        return (s[:79] + "…") if len(s) > 80 else s
+
+    data = [[cell(v) for v in r] for r in rows]
+    widths = [max(len(cols[i]), *(len(r[i]) for r in data)) for i in range(len(cols))]
+    fmt = lambda cells: "  ".join(s.ljust(widths[i]) for i, s in enumerate(cells))  # noqa: E731
+    print(fmt(cols))
+    print(fmt(["-" * w for w in widths]))
+    for r in data:
+        print(fmt(r))
+    print(f"\n{len(rows)} row(s)")
+    return 0
+
+
 # -- parser -------------------------------------------------------------------------------------
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="bean", description=__doc__,
@@ -498,6 +577,11 @@ def main(argv: list[str] | None = None) -> int:
 
     p = sub.add_parser("status", help="workspace, auth, and index state")
     p.set_defaults(fn=cmd_status)
+
+    p = sub.add_parser("sql", help="run a read-only SQL query over the store (no query = show schema)")
+    p.add_argument("query", nargs="*")
+    p.add_argument("--global", dest="global_", action="store_true", help="query the shared cross-repo store")
+    p.set_defaults(fn=cmd_sql)
 
     p = sub.add_parser("plugins", help="list drop-in connectors loaded from the plugin dirs")
     p.set_defaults(fn=cmd_plugins)
