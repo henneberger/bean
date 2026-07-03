@@ -1,14 +1,15 @@
 # bean
 
-Bean is a local hybrid search over your work knowledge, packaged as a Claude
+bean is a local hybrid search over your work knowledge, packaged as a Claude
 Code plugin.
 
-You already pay for a Claude plan, why pay again for API calls? Or hand your docs to yet another
-LLM-wrapper SaaS? Not ready to drop $100k on search? Use Bean, it has no server: bean pulls with your own credentials, embeds on your machine, and stores everything locally.
+You already pay for a Claude plan, so why pay again for API calls? Or hand your docs to yet another
+LLM-wrapper SaaS? Not ready to drop $100k on search? bean has no server: it pulls with your own
+credentials, embeds on your machine, and stores everything locally.
 
 ## Install
 
-In Claude Code, add this repo as a plugin marketplace, then install the plugin — run the two
+In Claude Code, add this repo as a plugin marketplace, then install the plugin. Run the two
 commands one at a time (the marketplace add takes a full clone URL, not an `owner/repo` shorthand):
 
 ```
@@ -26,8 +27,8 @@ commands one at a time (the marketplace add takes a full clone URL, not an `owne
 /bean sql "SELECT …"           # read-only SQL over the store (no query = print the schema)
 ```
 
-`/bean` is not one search. Claude picks from a toolbox — hybrid `search`, `recent`, whole-`thread`
-or `doc` pull, graph `related`, `neighbors` — and composes them. Ask *"I had a convo in the product
+`/bean` is not one search. Claude picks from a toolbox (hybrid `search`, `recent`, whole-`thread`
+or `doc` pull, graph `related`, `neighbors`) and composes them. Ask *"I had a convo in the product
 channel, what's the impact on my docs?"* and it grabs the recent Slack conversation, pulls the
 topics out, then searches your Google Docs for what those topics touch.
 
@@ -35,18 +36,18 @@ topics out, then searches your Google Docs for what those topics touch.
 
 `/bean` takes plain questions — Claude figures out which tools to run. Some things to try:
 
-- **"what's new this week?"** — recent activity across every source, newest first.
-- **"where did I write about WAL?"** — finds the doc even if you called it a "write-ahead log"
-  elsewhere; exact terms and identifiers land too.
-- **"what did we decide about pricing in #product?"** — pulls the Slack thread and summarizes.
-- **"who last touched the billing runbook, and when?"** — author + recency come back with the hit.
-- **"find ticket ZQ-9001"** — an identifier lands its chunk even with nothing semantically near it.
-- **"what else relates to the launch doc?"** — graph hop to the same project/channel/author.
-- **"summarize the deploy thread and link the doc it references."** — multi-step: thread → search → cite.
-- **"what changed since Monday?"** — date-filtered recency (`--since`).
+- **"what's new this week?"** Recent activity across every source, newest first.
+- **"where did I write about WAL?"** Finds the doc even if you called it a "write-ahead log"
+  elsewhere. Exact terms and identifiers land too.
+- **"what did we decide about pricing in #product?"** Pulls the Slack thread and summarizes.
+- **"who last touched the billing runbook, and when?"** Author and recency come back with the hit.
+- **"find ticket ZQ-9001"** An identifier lands its chunk even with nothing semantically near it.
+- **"what else relates to the launch doc?"** Graph hop to the same project/channel/author.
+- **"summarize the deploy thread and link the doc it references."** Multi-step: thread, then search, then cite.
+- **"what changed since Monday?"** Date-filtered recency (`--since`).
 
 Under the hood these map to `search` (with `--variant`, `--author`, `--since`, `--before`), `recent`,
-`thread` / `doc`, and `related`; Claude runs them for you and cites every source by title and URL.
+`thread` / `doc`, and `related`. Claude runs them for you and cites every source by title and URL.
 
 ## Connectors
 
@@ -99,15 +100,15 @@ Changing scope moves the connector's config and purges its old index, so run `be
 
 Every query runs two rankings and fuses them with **weighted** reciprocal rank fusion:
 
-- **Vectors** (Lance) for meaning — *"how are customers billed"* finds the billing doc that never
+- **Vectors** (Lance) for meaning: *"how are customers billed"* finds the billing doc that never
   says "billed".
-- **Keywords** (DuckDB) for exactness — an identifier like `ZQ-9001`, an error string, or a
+- **Keywords** (DuckDB) for exactness: an identifier like `ZQ-9001`, an error string, or a
   `#channel` lands its chunk even when nothing is semantically near it.
 
-Fusion is tunable: pass extra `--variant` queries (a paraphrase plus the identifiers you spotted)
-and they all fuse; `auto_weight` leans keyword for identifier queries and vector for questions;
-`recency_decay` biases toward recently-changed docs; adjacent chunks **merge into sections**; and an
-optional local cross-encoder **reranker** (`search.rerank.enabled`, fastembed — no API) polishes the
+Fusion is tunable. Pass extra `--variant` queries (a paraphrase plus the identifiers you spotted)
+and they all fuse. `auto_weight` leans keyword for identifier queries and vector for questions.
+`recency_decay` biases toward recently-changed docs. Adjacent chunks **merge into sections**. An
+optional local cross-encoder **reranker** (`search.rerank.enabled`, fastembed, no API) polishes the
 top results. Filter by `--author` / `--since` / `--before`, or widen from a doc to its graph
 neighbourhood with `bean related <ref>` (same repo/project/channel/author). Turn fusion off
 globally with `config set search.hybrid false`.
@@ -128,7 +129,7 @@ stay in `~/.bean/credentials/`, mode 0600).
 
 Every leaf below is settable with `config set <path> <value>` (values coerce to the default's type).
 Changing an **index-shape** knob (embedding model, any `chunking.*`, enabling `rerank`) needs a
-`bean sync --rebuild`; `status` warns if the index was built with a different embedding model than
+`bean sync --rebuild`. `status` warns if the index was built with a different embedding model than
 configured.
 
 | Path | Default | What it does |
@@ -168,16 +169,15 @@ since chat is short.
 never re-scan a window on every sync. `sync --rebuild` ignores the cursor to re-pull within `--since`.
 
 **The embedder is pluggable.** The default `model2vec` backend (`minishlab/potion-retrieval-32M`) is
-a static CPU embedder that runs ~100× faster than the old fastembed default; keyword fusion and
+a static CPU embedder that runs ~100× faster than the old fastembed default. Keyword fusion and
 refusable results absorb the small accuracy gap, so bean is speed-first out of the box. Switch
 `embedding.backend` to `fastembed` for an ONNX transformer (e.g. `BAAI/bge-small-en-v1.5`), or point
 `embedding.plugin` at a `.py` exposing `embed(texts)` to bring any library or API. The model
-downloads automatically the first time you actually sync or search — not at setup — and is cached
-afterward.
+downloads automatically the first time you sync or search (not at setup) and is cached afterward.
 
 ## PDF parsing
 
-bean reads PDFs in local folders and native PDFs in Google Drive — both go through the same
+bean reads PDFs in local folders and native PDFs in Google Drive. Both go through the same
 extractor and honor the `ocr.backend` setting below. Born-digital PDFs use embedded text (pymupdf, a
 base dependency). For scans, handwriting, or complex layouts, set `ocr.backend` to `unlimited-ocr` and
 bean runs pages through [baidu/Unlimited-OCR](https://github.com/baidu/Unlimited-OCR), a
@@ -196,34 +196,34 @@ a 2024 laptop (Apple M3 Pro, no GPU), with the default `model2vec` embedder:
 | Work | Throughput | So a first sync of… |
 |------|-----------|---------------------|
 | **Text/office docs** (Slack, Docs, wikis, Markdown, `.docx`/`.pptx`/`.xlsx`, comments) | **~70–110 docs/sec** (≈300k/hour) | 50,000 docs ≈ **8–12 min** |
-| **Born-digital PDFs** (embedded text, pymupdf — the default) | **~350 pages/sec** | basically instant; a 300-page PDF ≈ 1 sec |
+| **Born-digital PDFs** (embedded text, pymupdf, the default) | **~350 pages/sec** | basically instant; a 300-page PDF ≈ 1 sec |
 | **Scanned PDFs** (`ocr.backend = unlimited-ocr`, opt-in) | **~40 sec/page** (~1.5 pages/min) | 700 scanned pages ≈ **8 hours** |
 
-Takeaways: text and born-digital PDFs index in minutes even for a large corpus — re-syncs only touch
-what changed, so they're far quicker. **Scanned PDFs are the slow path.** If you point bean at a pile
-of scans with OCR on, plan on ~40 seconds per page and **leave the laptop running overnight** — a few
-hundred pages is an evening, a few thousand is a couple of nights. Sync is resumable, so an interrupted
-overnight run picks up where it left off. (One-time downloads on first use, excluded above: the
-embedding model ~30 MB, and the OCR model ~6 GB the first time you enable it.)
+Takeaways: text and born-digital PDFs index in minutes even for a large corpus, and re-syncs only
+touch what changed, so they're far quicker. **Scanned PDFs are the slow path.** If you point bean at
+a pile of scans with OCR on, plan on ~40 seconds per page and **leave the laptop running overnight**.
+A few hundred pages is an evening; a few thousand is a couple of nights. Sync is resumable, so an
+interrupted overnight run picks up where it left off. (One-time downloads on first use, excluded
+above: the embedding model ~30 MB, and the OCR model ~6 GB the first time you enable it.)
 
 ## How it works
 
-- **Sources.** Each connector has a cheap change signal — a revision id, an `updated_at`, a git
-  blob sha, or a file mtime — with the content hash as the final authority. `sync` re-embeds only
-  what actually changed; deletions revoke their vectors. Sync is resumable — the embed phase
+- **Sources.** Each connector has a cheap change signal (a revision id, an `updated_at`, a git
+  blob sha, or a file mtime), with the content hash as the final authority. `sync` re-embeds only
+  what changed; deletions revoke their vectors. Sync is resumable: the embed phase
   checkpoints per document (oldest first), so an interrupted run picks up where it left off without
   re-embedding what's done or skipping anything.
 - **Storage.** One DuckDB catalog per workspace holds document snapshots, revision history, sync
   cursors, and the relationship edges; a Lance table alongside it holds the chunks (text + vectors)
-  as the single copy. There is no chunk mirror — keyword search, neighbours, and section-merge run
+  as the single copy. There is no chunk mirror: keyword search, neighbours, and section-merge run
   as DuckDB SQL **directly over the Lance dataset** (register + query), so DuckDB stays the
   relational engine while chunk data lives once. Workspaces live at `~/.bean/<repo-name>-<hash>/`
   (global connectors share `~/.bean/_global/`). Credentials follow scope: a **global** connector's
   is shared at `~/.bean/credentials/`; a **local** connector's lives in that repo's workspace (so a
-  different GitHub token per project just works), with the shared dir as a fallback. All mode 0600,
+  different GitHub token per project works), with the shared dir as a fallback. All mode 0600,
   never inside a repo. `bean sql "SELECT …"` runs read-only queries (SELECT/WITH) straight over this
-  store — tables `documents`, `edges`, `state`, and the Lance `_chunks` dataset — for structured
-  questions like counts by author; `bean sql` with no query prints the schema, `--global` targets
+  store (tables `documents`, `edges`, `state`, and the Lance `_chunks` dataset) for structured
+  questions like counts by author. `bean sql` with no query prints the schema; `--global` targets
   the shared store.
 - **Auth.** Google rides on gcloud's own pre-verified OAuth client, so nobody sets up a GCP
   project. Slack and GitHub take a token you paste once.
@@ -233,6 +233,6 @@ embedding model ~30 MB, and the OCR model ~6 GB the first time you enable it.)
 - Google's Markdown export drops images, drawings, and smart chips; docs that refuse Markdown fall
   back to plain text.
 - After the first sync, Slack/Discord continue from a per-channel cursor and re-render the current
-  week, so edits to that week land but edits to older weeks are missed by design; `sync --rebuild`
+  week, so edits to that week land but older-week edits don't (by design). `sync --rebuild`
   re-fetches everything within `--since` days (default 90).
 - GitHub syncs issues/PRs incrementally by `updated_at`; a removed repo prunes everything under it.
