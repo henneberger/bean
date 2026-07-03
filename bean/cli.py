@@ -26,13 +26,33 @@ import json
 import sys
 
 from . import config as cfgmod
-from .search import document, neighbors, recent, related, search, thread
-from .sources import SOURCES, route_add
+from .search import (document_many, neighbors_many, recent_many, related_many, search_many,
+                     thread_many)
+from .sources import BY_KEY, SOURCES, route_add
 from .store import Store
-from .workspace import Workspace
+from .workspace import Workspace, load_scopes, set_source_scope, source_scope
 
 SOURCE_KEYS = [s.key for s in SOURCES]
 AUTH = {s.auth: s for s in SOURCES if s.auth}
+
+
+def _scope_split():
+    """(global_keys, local_keys) over the registered sources, from ~/.bean/scopes.json."""
+    scopes = load_scopes()
+    glob = {k for k in SOURCE_KEYS if scopes.get(k, "local") == "global"}
+    return glob, set(SOURCE_KEYS) - glob
+
+
+def _retrieval_wss(ws: Workspace) -> list:
+    """The workspaces a query should read: the repo workspace, plus the shared global one when any
+    connector is global."""
+    glob, _ = _scope_split()
+    return [ws, Workspace.global_()] if glob else [ws]
+
+
+def _scoped_ws(ws: Workspace, source_key: str) -> Workspace:
+    """The workspace a given source's config + index live in, per its scope."""
+    return Workspace.global_() if source_scope(source_key) == "global" else ws
 
 
 def _ensure_lists(config: dict) -> dict:
@@ -67,13 +87,22 @@ def _last_sync_age(ws: Workspace):
     return last, (datetime.now(timezone.utc) - ts).days
 
 
+def _worst_age(ws: Workspace):
+    """Most-stale last-sync age across the repo workspace and (if any connector is global) the
+    shared global one — so a stale global index warns too."""
+    glob, _ = _scope_split()
+    wss = [ws] + ([Workspace.global_()] if glob else [])
+    ages = [a for a in (_last_sync_age(w)[1] for w in wss) if a is not None]
+    return max(ages) if ages else None
+
+
 def _staleness_note(ws: Workspace) -> str | None:
     """A stderr warning when the index is older than `sync.stale_days` — so an assistant reading the
     output nudges the user to sync. bean NEVER auto-syncs; this only warns."""
     days = (cfgmod.resolve(ws).get("sync") or {}).get("stale_days", 7)
     if not days:
         return None
-    _, age = _last_sync_age(ws)
+    age = _worst_age(ws)
     if age is not None and age >= days:
         return (f"⚠ bean: last synced {age} days ago (threshold {days}d) — the index may be stale. "
                 f"Suggest the user run `/bean sync`; do not run sync yourself.")
@@ -86,42 +115,55 @@ def _cred_path(name: str):
     return bean_home() / "credentials" / f"{name}.json"
 
 
-def _init_payload(ws: Workspace, config: dict) -> dict:
+def _scope_ctx(ws: Workspace):
+    """(scopes, repo_config, global_config, global_ws) — everything init/status need to place each
+    source in its scope."""
+    gws = Workspace.global_()
+    return (load_scopes(), _ensure_lists(ws.load_config()), _ensure_lists(gws.load_config()), gws)
+
+
+def _init_payload(ws: Workspace) -> dict:
     """Machine-readable setup state — one entry per source so the assistant can set a source up by
-    writing files directly: where the credential JSON goes, which fields it takes, and which config
-    lists hold tracked refs. `bean auth …` / `bean add …` remain as the user-run alternative."""
+    writing files directly: where the credential JSON goes, which fields it takes, which config
+    lists hold tracked refs, and its scope (global = all repos, local = this repo)."""
+    scopes, repo_cfg, glob_cfg, gws = _scope_ctx(ws)
+    from .workspace import bean_home
     sources = []
     for s in SOURCES:
+        scope = scopes.get(s.key, "local")
+        cfg, cfgws = (glob_cfg, gws) if scope == "global" else (repo_cfg, ws)
         conn = s.connected() if s.connected else None
-        node = config.get(s.config_key) or {}
         sources.append({
-            "key": s.key, "label": s.label,
+            "key": s.key, "label": s.label, "scope": scope,
             "auth": s.auth, "interactive_auth": s.interactive_auth,
             "connected": bool(conn) if s.auth else None,
             "credential_path": str(_cred_path(s.auth)) if s.auth else None,
             "credential_fields": s.auth_help or ("token" if s.auth else None),
             "auth_command": (None if not s.auth else
                              f"bean auth {s.auth}" + ("" if s.interactive_auth else f" {s.auth_help}".rstrip())),
-            "config_key": s.config_key, "config_path": str(ws.config_path),
+            "config_key": s.config_key, "config_path": str(cfgws.config_path),
             "lists": list(s.lists), "add_help": s.add_help,
-            "tracked": _tracked(config, s),
+            "tracked": _tracked(cfg, s),
+            "scope_command": f"bean scope {s.key} global|local",
             "always_when_connected": s.always_when_connected,
         })
     return {"workspace": str(ws.dir), "repo": str(ws.repo),
-            "config_path": str(ws.config_path),
+            "global_workspace": str(gws.dir), "scopes_path": str(bean_home() / "scopes.json"),
             "credentials_dir": str(_cred_path("x").parent), "sources": sources}
 
 
 def cmd_init(ws: Workspace, args) -> int:
-    config = _ensure_lists(ws.load_config())
     if getattr(args, "json", False):
-        print(json.dumps(_init_payload(ws, config), indent=2))
+        print(json.dumps(_init_payload(ws), indent=2))
         return 0
+    scopes, repo_cfg, glob_cfg, _ = _scope_ctx(ws)
     print(f"bean workspace: {ws.dir}  (repo: {ws.repo})\n")
     any_connected = False
     for s in SOURCES:
+        scope = scopes.get(s.key, "local")
+        cfg = glob_cfg if scope == "global" else repo_cfg
         conn = s.connected() if s.connected else {"local": True}
-        tracked = _tracked(config, s)
+        tracked = _tracked(cfg, s)
         mark = "x" if (conn and (tracked or s.always_when_connected)) else " "
         if conn:
             any_connected = True
@@ -136,12 +178,15 @@ def cmd_init(ws: Workspace, args) -> int:
         else:
             verb = "bean auth " + s.auth
             state = f"→ {verb}" + ("" if s.interactive_auth else f" {s.auth_help}".rstrip())
-        print(f"[{mark}] {s.label:<20} {state}")
+        print(f"[{mark}] {s.label:<20} {scope:<6} {state}")
+    print("\nScope: `global` connectors index once and are searchable from every repo; `local` ones "
+          "are scoped to this repo (e.g. a GitHub project). **Ask the user per connector**, then set "
+          "it with `bean scope <source> global|local` (or `bean add <ref> --global` / `--local`).")
     print("\nSetup is assistant-guided. For each source you want, either:")
     print("  • paste the token and let the assistant run the command / write the files, or")
     print("  • run the printed `bean auth …` yourself (token never leaves your machine), or")
     print(f"  • write the credential JSON to {_cred_path('<provider>')} and refs into config yourself.")
-    print("  (`bean init --json` prints the exact paths + fields for every source.)")
+    print("  (`bean init --json` prints the exact paths + fields + scope for every source.)")
     if any_connected:
         print("\nThen: bean sync   (first sync downloads the embedding model once)")
         print('Ask:  bean search "how do refunds work?"')
@@ -149,25 +194,29 @@ def cmd_init(ws: Workspace, args) -> int:
 
 
 def cmd_status(ws: Workspace, args) -> int:
-    config = _ensure_lists(ws.load_config())
+    scopes, repo_cfg, glob_cfg, gws = _scope_ctx(ws)
     with Store(ws) as store:
-        counts = store.counts()
+        rc = store.counts()
         indexed_model = store.get_state("embedding.model")
+    with Store(gws) as gstore:
+        gc = gstore.counts()
     settings = cfgmod.resolve(ws)
-    last_sync, age = _last_sync_age(ws)
+    age = _worst_age(ws)
     stale_days = (settings.get("sync") or {}).get("stale_days", 7)
     stale = bool(stale_days and age is not None and age >= stale_days)
     sources = {}
     for s in SOURCES:
+        scope = scopes.get(s.key, "local")
+        cfg = glob_cfg if scope == "global" else repo_cfg
+        counts = gc if scope == "global" else rc
         conn = s.connected() if s.connected else {"local": True}
-        node = config.get(s.config_key) or {}
-        sources[s.key] = {"connected": bool(conn), "tracked": _tracked(config, s),
+        node = cfg.get(s.config_key) or {}
+        sources[s.key] = {"connected": bool(conn), "scope": scope, "tracked": _tracked(cfg, s),
                           "indexed": counts.get(s.key, 0),
                           "lists": {name: node.get(name) or [] for name in s.lists}}
-    payload = {"workspace": str(ws.dir), "repo": str(ws.repo),
+    payload = {"workspace": str(ws.dir), "repo": str(ws.repo), "global_workspace": str(gws.dir),
                "embedding": {"configured": settings["embedding"]["model"], "indexed_with": indexed_model},
-               "last_sync": last_sync, "last_sync_age_days": age, "stale": stale,
-               "sources": sources}
+               "last_sync_age_days": age, "stale": stale, "sources": sources}
     if args.json:
         print(json.dumps(payload, indent=2))
         return 0
@@ -175,12 +224,12 @@ def cmd_status(ws: Workspace, args) -> int:
     em = settings["embedding"]["model"]
     warn = "" if (not indexed_model or indexed_model == em) else f"  ⚠ index built with {indexed_model} — run `bean reembed`"
     print(f"embedding: {em}{warn}")
-    sync_line = "never synced" if last_sync is None else f"{age}d ago" + ("  ⚠ stale — run `bean sync`" if stale else "")
+    sync_line = "never synced" if age is None else f"{age}d ago" + ("  ⚠ stale — run `bean sync`" if stale else "")
     print(f"last sync:  {sync_line}")
     for s in SOURCES:
         info = sources[s.key]
         conn = "local" if not s.auth else ("connected" if info["connected"] else "not connected")
-        print(f"{s.label:<13} {conn:<15} tracked={info['tracked']} indexed={info['indexed']}")
+        print(f"{s.label:<13} {info['scope']:<7} {conn:<15} tracked={info['tracked']} indexed={info['indexed']}")
     return 0
 
 
@@ -217,56 +266,117 @@ def cmd_add(ws: Workspace, args) -> int:
               "owner/repo (or github.com URL), or a file/folder path.", file=sys.stderr)
         return 2
     src, list_key, value = routed
-    config = _ensure_lists(ws.load_config())
+    # Scope: an explicit flag, else the source's existing scope (default local). Global sources'
+    # items live in the shared ~/.bean/_global workspace; local ones in this repo's workspace.
+    scope = "global" if args.global_ else ("local" if args.local else source_scope(src.key))
+    target_ws = Workspace.global_() if scope == "global" else ws
+    config = _ensure_lists(target_ws.load_config())
     target = config[src.config_key][list_key]
     if value not in target:
         target.append(value)
-    ws.save_config(config)
-    print(f"✓ tracking {args.item} in {src.label} — next: bean sync")
+    target_ws.save_config(config)
+    set_source_scope(src.key, scope)
+    where = "all repos (global)" if scope == "global" else "this repo (local)"
+    print(f"✓ tracking {args.item} in {src.label} [{where}] — next: bean sync")
     return 0
 
 
 def cmd_remove(ws: Workspace, args) -> int:
-    config = _ensure_lists(ws.load_config())
     routed = route_add(args.item)
     candidates = {args.item, args.item.lstrip("#")}
     if routed and isinstance(routed[2], str):  # some refs (e.g. sqldb queries) are dicts, not ids
         candidates.add(routed[2])
     removed = False
-    for s in SOURCES:
-        for name in s.lists:
-            lst = config[s.config_key][name]
-            for value in list(lst):
-                if isinstance(value, str) and value in candidates:
-                    lst.remove(value)
-                    removed = True
+    for w in (ws, Workspace.global_()):  # a ref could be tracked in either scope
+        config = _ensure_lists(w.load_config())
+        changed = False
+        for s in SOURCES:
+            for name in s.lists:
+                lst = config[s.config_key][name]
+                for value in list(lst):
+                    if isinstance(value, str) and value in candidates:
+                        lst.remove(value)
+                        removed = changed = True
+        if changed:
+            w.save_config(config)
     if not removed:
         print(f'"{args.item}" is not tracked — see bean status.', file=sys.stderr)
         return 2
-    ws.save_config(config)
     print(f"✓ untracked {args.item}")
+    return 0
+
+
+def cmd_scope(ws: Workspace, args) -> int:
+    """Show or set whether a connector is global (all repos) or local (this repo). Setting it moves
+    the connector's tracked config to the right workspace and purges its old index so the next
+    `bean sync` re-indexes it in the new scope."""
+    scopes = load_scopes()
+    if not args.source:
+        for k in SOURCE_KEYS:
+            print(f"{k:<14} {scopes.get(k, 'local')}")
+        return 0
+    key = args.source
+    if key not in SOURCE_KEYS:
+        print(f"Unknown source {key!r}. Choose from: {', '.join(SOURCE_KEYS)}", file=sys.stderr)
+        return 2
+    if not args.value:
+        print(f"{key}: {scopes.get(key, 'local')}")
+        return 0
+    new, old = args.value, scopes.get(key, "local")
+    if new == old:
+        print(f"{key} is already {new}.")
+        return 0
+    old_ws = Workspace.global_() if old == "global" else ws
+    new_ws = Workspace.global_() if new == "global" else ws
+    src = BY_KEY[key]
+    ocfg, ncfg = _ensure_lists(old_ws.load_config()), _ensure_lists(new_ws.load_config())
+    for name in src.lists:  # move tracked items to the new workspace
+        for v in ocfg[src.config_key][name]:
+            if v not in ncfg[src.config_key][name]:
+                ncfg[src.config_key][name].append(v)
+        ocfg[src.config_key][name] = []
+    old_ws.save_config(ocfg)
+    new_ws.save_config(ncfg)
+    from .index import delete_doc  # purge old index (DuckDB + Lance) so a resync repopulates
+    with Store(old_ws) as store:
+        for d in store.doc_ids(key):
+            store.delete(key, d)
+            delete_doc(old_ws, key, d)
+    set_source_scope(key, new)
+    print(f"✓ {key}: {old} → {new}. Run `bean sync` to (re)index it in the {new} store.")
     return 0
 
 
 # -- sync / reembed -----------------------------------------------------------------------------
 def cmd_sync(ws: Workspace, args) -> int:
     from .sync import run_sync
-    result = run_sync(ws, only=args.source, full=args.full, since_days=args.since,
-                      log=lambda m: print(f"  · {m}", file=sys.stderr))
-    for err in result["errors"]:
+    glob, loc = _scope_split()
+    log = lambda m: print(f"  · {m}", file=sys.stderr)  # noqa: E731
+    results = [run_sync(ws, only=args.source, keys=loc, full=args.full, since_days=args.since, log=log)]
+    if glob:  # global sources sync into the shared workspace
+        results.append(run_sync(Workspace.global_(), only=args.source, keys=glob, full=args.full,
+                                since_days=args.since, log=log))
+    errors = [e for r in results for e in r["errors"]]
+    changed = sum(len(r["changed"]) for r in results)
+    removed = sum(len(r["removed"]) for r in results)
+    chunks = sum(r["chunks"] for r in results)
+    for err in errors:
         print(f"✗ {err}", file=sys.stderr)
-    n_changed, n_removed = len(result["changed"]), len(result["removed"])
-    if not n_changed and not n_removed:
-        print("✓ knowledge base is up to date." if not result["errors"] else "nothing synced.")
+    if not changed and not removed:
+        print("✓ knowledge base is up to date." if not errors else "nothing synced.")
     else:
-        print(f"✓ {n_changed} document(s) updated, {n_removed} removed — {result['chunks']} chunk(s) embedded.")
-    return 1 if result["errors"] else 0
+        print(f"✓ {changed} document(s) updated, {removed} removed — {chunks} chunk(s) embedded.")
+    return 1 if errors else 0
 
 
 def cmd_reembed(ws: Workspace, args) -> int:
     from .sync import reembed
-    r = reembed(ws, log=lambda m: print(f"  · {m}", file=sys.stderr))
-    print(f"✓ re-embedded {r['docs']} document(s) → {r['chunks']} chunk(s) with {r['model']}.")
+    log = lambda m: print(f"  · {m}", file=sys.stderr)  # noqa: E731
+    r = reembed(ws, log=log)
+    docs, chunks = r["docs"], r["chunks"]
+    rg = reembed(Workspace.global_(), log=log)  # also the shared global index (no-op if empty)
+    docs += rg["docs"]; chunks += rg["chunks"]
+    print(f"✓ re-embedded {docs} document(s) → {chunks} chunk(s) with {r['model']}.")
     return 0
 
 
@@ -295,37 +405,38 @@ def cmd_search(ws: Workspace, args) -> int:
     if not query:
         print('Usage: bean search "your question"', file=sys.stderr)
         return 2
-    hits = search(ws, query, queries=args.variant, k=args.k, source=args.source, doc_like=args.doc,
-                  expand=args.expand, hybrid=not args.no_hybrid, author=args.author,
-                  since=args.since, before=args.before)
+    hits = search_many(_retrieval_wss(ws), query, queries=args.variant, k=args.k,
+                       source=args.source, doc_like=args.doc, expand=args.expand,
+                       hybrid=not args.no_hybrid, author=args.author, since=args.since,
+                       before=args.before)
     return _print_hits(query, hits, args.json,
                        "No matches. Have you run `bean sync`? (`bean status` shows what's indexed.)")
 
 
 def cmd_recent(ws: Workspace, args) -> int:
-    hits = recent(ws, source=args.source, doc_like=args.doc, author=args.author,
-                  since=args.since, before=args.before, limit=args.limit)
+    hits = recent_many(_retrieval_wss(ws), source=args.source, doc_like=args.doc,
+                       author=args.author, since=args.since, before=args.before, limit=args.limit)
     return _print_hits(None, hits, args.json, "Nothing indexed yet — run `bean sync`.")
 
 
 def cmd_related(ws: Workspace, args) -> int:
-    hits = related(ws, args.ref, source=args.source, limit=args.limit)
+    hits = related_many(_retrieval_wss(ws), args.ref, source=args.source, limit=args.limit)
     return _print_hits(None, hits, args.json,
                        f'No documents related to "{args.ref}" (graph edges build on `bean sync`).')
 
 
 def cmd_thread(ws: Workspace, args) -> int:
-    hits = thread(ws, args.ref, source=args.source)
+    hits = thread_many(_retrieval_wss(ws), args.ref, source=args.source)
     return _print_hits(None, hits, args.json, f'No thread/document matching "{args.ref}".')
 
 
 def cmd_doc(ws: Workspace, args) -> int:
-    hits = document(ws, args.ref, source=args.source)
+    hits = document_many(_retrieval_wss(ws), args.ref, source=args.source)
     return _print_hits(None, hits, args.json, f'No document matching "{args.ref}".')
 
 
 def cmd_neighbors(ws: Workspace, args) -> int:
-    hits = neighbors(ws, args.chunk_id, radius=args.radius)
+    hits = neighbors_many(_retrieval_wss(ws), args.chunk_id, radius=args.radius)
     return _print_hits(None, hits, args.json, f'No chunk "{args.chunk_id}".')
 
 
@@ -424,11 +535,19 @@ def main(argv: list[str] | None = None) -> int:
 
     p = sub.add_parser("add", help="track a doc/channel/page/repo/path")
     p.add_argument("item")
+    p.add_argument("--global", dest="global_", action="store_true",
+                   help="track for ALL repos (shared global index)")
+    p.add_argument("--local", action="store_true", help="track for THIS repo only (default)")
     p.set_defaults(fn=cmd_add)
 
     p = sub.add_parser("remove", help="stop tracking a ref")
     p.add_argument("item")
     p.set_defaults(fn=cmd_remove)
+
+    p = sub.add_parser("scope", help="show/set whether a connector is global (all repos) or local")
+    p.add_argument("source", nargs="?", choices=SOURCE_KEYS)
+    p.add_argument("value", nargs="?", choices=["global", "local"])
+    p.set_defaults(fn=cmd_scope)
 
     p = sub.add_parser("sync", help="fetch changes and re-embed them")
     p.add_argument("source", nargs="?", choices=SOURCE_KEYS)

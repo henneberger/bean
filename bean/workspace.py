@@ -45,6 +45,21 @@ class Workspace:
         self.dir = bean_home() / f"{slug}-{digest}"
         self.dir.mkdir(parents=True, exist_ok=True)
 
+    @classmethod
+    def global_(cls) -> "Workspace":
+        """The shared workspace for *global* connectors — one index under ~/.bean/_global/ that is
+        visible from every repo. Same machinery (config.json / DuckDB / Lance) as a repo workspace,
+        just not keyed by a repo."""
+        ws = cls.__new__(cls)
+        ws.repo = None
+        ws.dir = bean_home() / "_global"
+        ws.dir.mkdir(parents=True, exist_ok=True)
+        return ws
+
+    @property
+    def is_global(self) -> bool:
+        return self.repo is None
+
     @property
     def db_path(self) -> Path:
         return self.dir / "bean.duckdb"
@@ -66,6 +81,37 @@ class Workspace:
 
     def save_config(self, config: dict) -> None:
         self.config_path.write_text(json.dumps(config, indent=2) + "\n")
+
+
+# -- connector scope (per user): which sources sync globally vs per-repo -----------------------
+# A source is "global" (indexed once, searchable from every repo) or "local" (scoped to the repo
+# you run bean in, e.g. a GitHub project). Default is local. Stored at ~/.bean/scopes.json as
+# {source_key: "global"|"local"}. Credentials stay global regardless — this only governs which
+# workspace holds the tracked items + index.
+def _scopes_path() -> Path:
+    return bean_home() / "scopes.json"
+
+
+def load_scopes() -> dict:
+    try:
+        return json.loads(_scopes_path().read_text())
+    except (OSError, ValueError):
+        return {}
+
+
+def save_scopes(scopes: dict) -> None:
+    bean_home().mkdir(parents=True, exist_ok=True)
+    _scopes_path().write_text(json.dumps(scopes, indent=2) + "\n")
+
+
+def source_scope(key: str, default: str = "local") -> str:
+    return load_scopes().get(key, default)
+
+
+def set_source_scope(key: str, scope: str) -> None:
+    scopes = load_scopes()
+    scopes[key] = scope
+    save_scopes(scopes)
 
 
 # -- credentials (per user, never per repo) ----------------------------------------------------

@@ -82,6 +82,15 @@ web/RSS, SQL, …) ship as **prototypes**: `beanw.py plugins list` shows them; `
 **`bean-connector` skill**, which walks you through writing an offline-tested plugin dropped into
 `~/.bean/plugins/`.
 
+**Scope — ask this for every connector you set up.** A connector is either **global** (indexed once,
+searchable from every repo — e.g. Slack, your personal Google Drive, Gmail) or **local** (scoped to
+the repo you're in — e.g. a GitHub project, this repo's files). Global connectors live in a shared
+`~/.bean/_global` index; local ones in the per-repo workspace; search unions both. When connecting a
+source, **ask the user "global (all repos) or local (just this repo)?"** and set it with
+`beanw.py scope <source> global|local` (or `beanw.py add <ref> --global` / `--local`). Each source's
+scope + config path is in `init --json`. Changing scope purges the old index — tell the user to
+`sync` afterward.
+
 Walk the user through what's missing, one source at a time. For each, get the token (ask where to
 create it — the error message from a failed `auth` names the exact page), then set it up **one of
 three ways**, matching the user's comfort:

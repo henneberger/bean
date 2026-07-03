@@ -277,3 +277,66 @@ def related(ws, doc_like: str, *, source: str | None = None, limit: int = 20) ->
             return []
         m = match[0]
         return _as_hits(store.related(m["source"], m["doc_id"], limit=limit))
+
+
+# -- scope-aware unions: run a retrieval across [repo workspace, global workspace] and merge ------
+def _as_list(wss) -> list:
+    return list(wss) if isinstance(wss, (list, tuple)) else [wss]
+
+
+def _dedup(hits: list[dict], k: int | None, *, by_recency: bool = False) -> list[dict]:
+    if by_recency:
+        hits = sorted(hits, key=lambda h: (h.get("modified_at") is None, h.get("modified_at")),
+                      reverse=True)
+    else:
+        hits = sorted(hits, key=lambda h: (h.get("score") is None, -(h.get("score") or 0.0)))
+    seen, out = set(), []
+    for h in hits:
+        key = (h.get("source"), h.get("doc_id"), h.get("id"))
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(h)
+    return out[:k] if k else out
+
+
+def search_many(wss, query: str, *, k: int | None = None, **kw) -> list[dict]:
+    wss = _as_list(wss)
+    kk = k or cfgmod.resolve(wss[0])["search"]["k"]
+    hits: list[dict] = []
+    for w in wss:
+        hits += search(w, query, k=k, **kw)
+    return _dedup(hits, kk)
+
+
+def recent_many(wss, *, limit: int = 20, **kw) -> list[dict]:
+    hits: list[dict] = []
+    for w in _as_list(wss):
+        hits += recent(w, limit=limit, **kw)
+    return _dedup(hits, limit, by_recency=True)
+
+
+def related_many(wss, doc_like: str, *, limit: int = 20, **kw) -> list[dict]:
+    hits: list[dict] = []
+    for w in _as_list(wss):
+        hits += related(w, doc_like, limit=limit, **kw)
+    return _dedup(hits, limit, by_recency=True)
+
+
+def document_many(wss, doc_like: str, **kw) -> list[dict]:
+    hits: list[dict] = []
+    for w in _as_list(wss):
+        hits += document(w, doc_like, **kw)
+    return _dedup(hits, 5)
+
+
+def thread_many(wss, doc_like: str, **kw) -> list[dict]:
+    return document_many(wss, doc_like, **kw)
+
+
+def neighbors_many(wss, chunk_id: str, *, radius: int = 3) -> list[dict]:
+    for w in _as_list(wss):
+        got = neighbors(w, chunk_id, radius=radius)
+        if got:
+            return got
+    return []

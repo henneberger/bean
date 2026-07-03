@@ -559,6 +559,78 @@ with Store(stws) as store:
 ok(_staleness_note(stws) is None, "stale_days=0 disables the warning")
 cfgmod.save_global({})
 
+# == global vs local connector scope ============================================================
+from bean.workspace import save_scopes, set_source_scope, source_scope  # noqa: E402
+from bean.search import search_many  # noqa: E402
+from bean.sync import run_sync as _run_sync  # noqa: E402
+import io as _io, contextlib as _ctx  # noqa: E402
+
+save_scopes({})
+ok(source_scope("slack") == "local", "default connector scope is local")
+set_source_scope("slack", "global")
+ok(source_scope("slack") == "global", "scope set/get round-trips")
+save_scopes({})
+
+g1, g2 = Workspace.global_(), Workspace.global_()
+ok(g1.dir == g2.dir and g1.is_global and g1.dir.name == "_global", "global workspace is stable + flagged")
+
+# run_sync keys= restricts which sources sync (route global vs local sets into different stores)
+kdir = Path(tempfile.mkdtemp(prefix="bean-keys-"))
+(kdir / "n.md").write_text("# Note\nsome content about widgets and rollbacks for indexing purposes here\n")
+kws = Workspace(repo("keys"))
+kws.save_config({"localfiles": {"paths": [str(kdir)]}, "github": {"repos": ["a/b"]}})
+save_credential("github", {"token": "t"})
+kr = _run_sync(kws, keys={"localfiles"}, embed_fn=fake_embed,
+               fetch=lambda u, h, method="GET", body=None: res(404, "{}"))
+ok(kr["changed"] and all(s == "localfiles" for s, _ in kr["changed"]),
+   f"run_sync keys= restricts to the named sources ({kr['changed']})")
+
+# a doc in the repo store + a doc in the global store both surface via search_many
+lrepo = Workspace(repo("scope-repo"))
+gws = Workspace.global_()
+with Store(lrepo) as s:
+    s.upsert("github", "acme/app#1", title="Local issue", url=None, revision_id=None,
+             body="the local repo ticket about deployment rollback steps and the details")
+with Store(gws) as s:
+    s.upsert("slack", "eng/2026-W01", title="Global slack", url=None, revision_id=None,
+             body="the global slack thread about deployment rollback plans and the timing")
+reembed(lrepo, embed_fn=fake_embed)
+reembed(gws, embed_fn=fake_embed)
+un = search_many([lrepo, gws], "deployment rollback", embed_query_fn=lambda q: fake_embed([q])[0], k=5)
+ok({h["source"] for h in un} >= {"github", "slack"}, f"search_many unions repo + global stores ({[h['source'] for h in un]})")
+
+# cmd_scope moves a connector's config + purges its old index (so a resync repopulates the new scope)
+from bean.cli import cmd_scope  # noqa: E402
+mrepo = Workspace(repo("scope-mig"))
+mrepo.save_config({"github": {"repos": ["x/y"]}})
+with Store(mrepo) as s:
+    s.upsert("github", "x/y#1", title="t", url=None, revision_id=None,
+             body="body about the scope migration test with enough content to index a chunk here")
+reembed(mrepo, embed_fn=fake_embed)
+save_scopes({})
+_args = type("A", (), {"source": "github", "value": "global"})()
+with _ctx.redirect_stdout(_io.StringIO()):
+    cmd_scope(mrepo, _args)
+ok(source_scope("github") == "global", "cmd_scope records the new scope")
+with Store(mrepo) as s:
+    ok(s.doc_ids("github") == [], "cmd_scope purges the moved source from the old (repo) store")
+ok("x/y" in (Workspace.global_().load_config().get("github") or {}).get("repos", []),
+   "cmd_scope moves tracked items into the global workspace config")
+ok("x/y" not in (mrepo.load_config().get("github") or {}).get("repos", []),
+   "cmd_scope removes the items from the repo config")
+
+# cleanup shared global state so later tests see a clean slate
+save_scopes({})
+_gws = Workspace.global_()
+with Store(_gws) as s:
+    for _src in ("slack", "github"):
+        for _d in s.doc_ids(_src):
+            s.delete(_src, _d)
+_gc = _gws.load_config()
+for _k in ("github", "slack"):
+    _gc.pop(_k, None)
+_gws.save_config(_gc)
+
 # -- notion + github render (offline fakes) -----------------------------------------------------
 def nfetch(url, headers):
     from urllib.parse import urlparse

@@ -81,6 +81,23 @@ into `~/.bean/plugins/`. The **`bean-connector` skill** walks Claude through the
 a test recipe, and a template; the ~45 prototypes in [`bean/prototypes/`](bean/prototypes/) are
 worked examples across every API shape. See [docs/connectors.md](docs/connectors.md).
 
+### Global vs local scope
+
+A connector is **global** or **local**. Global connectors (your Slack, personal Google Drive, Gmail)
+index once into a shared `~/.bean/_global/` store and are searchable from *every* repo. Local
+connectors (a GitHub project, this repo's files) live in the per-repo workspace. Search unions both,
+so from any repo you see that repo's local sources plus everything global. Credentials are always
+shared per-user; scope only governs where the *tracked items + index* live.
+
+```
+bean scope                       # show each connector's scope
+bean scope github local          # this repo only
+bean scope slack global          # all repos
+bean add owner/repo --global     # or set scope while adding
+```
+
+Changing scope moves the connector's config and purges its old index, so run `bean sync` afterward.
+
 ## Hybrid search
 
 Every query runs two rankings and fuses them with **weighted** reciprocal rank fusion:

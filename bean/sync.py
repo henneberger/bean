@@ -52,8 +52,11 @@ def _embed_rows(ws, store, source, doc_id, embed_fn, chunk_cfg) -> int:
     return sum(1 for v in vectors if v)
 
 
-def run_sync(ws: Workspace, *, only: str | None = None, full: bool = False,
-             since_days: int = 90, embed_fn=None, fetch=None, log=lambda m: None) -> dict:
+def run_sync(ws: Workspace, *, only: str | None = None, keys: set | None = None,
+             full: bool = False, since_days: int = 90, embed_fn=None, fetch=None,
+             log=lambda m: None) -> dict:
+    """Sync the workspace `ws`. `keys` restricts to a set of source keys (used to route global
+    sources into the global workspace and local ones into the repo workspace); None = all."""
     config = ws.load_config()
     settings = cfgmod.resolve(ws)
     chunk_cfg = settings["chunking"]
@@ -67,6 +70,8 @@ def run_sync(ws: Workspace, *, only: str | None = None, full: bool = False,
     with Store(ws) as store:
         for src in SOURCES:
             if only and only != src.key:
+                continue
+            if keys is not None and src.key not in keys:
                 continue
             src_cfg = config.get(src.config_key) or {}
             if not src.is_active(src_cfg):
