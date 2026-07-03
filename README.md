@@ -8,10 +8,11 @@ LLM-wrapper SaaS? Not ready to drop $100k on search? Use Bean, it has no server:
 
 ## Install
 
-In Claude Code, add this repo as a plugin marketplace and install it:
+In Claude Code, add this repo as a plugin marketplace, then install the plugin — run the two
+commands one at a time (the marketplace add takes a full clone URL, not an `owner/repo` shorthand):
 
 ```
-/plugin marketplace add henneberger/bean
+/plugin marketplace add https://github.com/henneberger/bean.git
 /plugin install bean@bean
 ```
 

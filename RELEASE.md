@@ -40,8 +40,9 @@ python3 dev/release.py cut 0.2.0 --yes
 ### After tagging
 
 - **Plugin users** get the release by pointing at the repo and installing:
-  `/plugin marketplace add <repo>` then `/plugin install bean@bean`. A tag pins a known-good version;
-  `/plugin` can update to it.
+  `/plugin marketplace add https://github.com/henneberger/bean.git` then `/plugin install bean@bean`
+  (the marketplace add takes a full clone URL, not an `owner/repo` shorthand). A tag pins a
+  known-good version; `/plugin` can update to it.
 - **Python package (optional).** The built `dist/*.whl` + `*.tar.gz` can go to PyPI with
   `twine upload dist/*` (not automated here — bean is primarily consumed as a plugin, not `pip install`).
 
