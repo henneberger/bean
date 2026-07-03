@@ -1,0 +1,65 @@
+name: Release
+
+# A release is a `vX.Y.Z` tag (cut locally with `make release VERSION=x.y.z YES=1`,
+# then `git push origin vX.Y.Z`). This workflow re-runs the offline gate, rebuilds the
+# wheel/sdist, and publishes a GitHub Release with those artifacts attached.
+#
+# workflow_dispatch runs the build path only (no Release is created) so you can smoke-test
+# the pipeline without tagging. A GitHub Release is created ONLY on a real tag push.
+on:
+  push:
+    tags: ['v*.*.*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      - name: Install bean + dev deps
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e '.[dev]'
+
+      # Guard: the pushed tag must match the version in pyproject.toml / plugin.json.
+      - name: Verify tag matches version
+        if: github.event_name == 'push'
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          ver="$(python scripts/release.py version)"
+          echo "tag=$tag  pyproject=$ver"
+          if [ "$tag" != "$ver" ]; then
+            echo "::error::tag v$tag does not match project version $ver — run scripts/release.py version $tag"
+            exit 1
+          fi
+
+      - name: Check (version sync + byte-compile + offline tests)
+        run: python scripts/release.py check
+
+      - name: Build wheel + sdist
+        run: python scripts/release.py build
+
+      - name: Upload dist artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: bean-dist-${{ github.ref_name }}
+          path: dist/*
+          if-no-files-found: error
+
+      # Publishes only on a tag push; workflow_dispatch stops at the build above.
+      - name: Create GitHub Release
+        if: github.event_name == 'push'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" dist/* \
+            --title "${GITHUB_REF_NAME}" \
+            --generate-notes

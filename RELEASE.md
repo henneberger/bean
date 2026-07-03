@@ -67,6 +67,12 @@ make clean                                     # remove dist/ build/ *.egg-info 
 Newest first. Dates are the tag date.
 
 ### Unreleased
+- **CI/release workflows** — `.github/workflows/ci.yml` (build + offline tests on push/PR across
+  Python 3.10–3.12) and `release.yml` (rebuilds artifacts and publishes a GitHub Release on a
+  `vX.Y.Z` tag). Both reuse `scripts/release.py check`/`build`.
+- **GitHub connector: issues + PRs only** — dropped repo Markdown indexing; the connector now tracks
+  issues and pull requests (body + comments). Narrowing `include` prunes previously-indexed docs on
+  the next sync.
 - **One copy of chunk data** — dropped the DuckDB chunk mirror; chunks live only in Lance and the
   keyword/neighbour/merge queries run as DuckDB SQL directly over the Lance dataset (adds `pylance`).
   No reembed needed (chunk `ord` is derived).

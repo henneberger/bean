@@ -50,7 +50,7 @@ bean ships **12 core connectors**, always on:
 | **Slack** | user token (`xoxp-…`) | channels, cut into per-week digests with threads as sections |
 | **Google Drive** | gcloud sign-in | Docs as Markdown; whole Drive folders |
 | **Notion** | integration token | pages and their nested blocks |
-| **GitHub** | personal access token | issues, pull requests (body + comments), and repo Markdown |
+| **GitHub** | personal access token | issues and pull requests (body + comments) |
 | **Confluence** | Cloud (email + API token) or Server/DC (PAT) | space pages (storage HTML → text) |
 | **Jira** | Cloud (email + API token) or Server/DC (PAT) | project issues + comments |
 | **Zendesk** | subdomain + email + API token | tickets + help-center articles |
