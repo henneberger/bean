@@ -2,7 +2,7 @@
 from a terminal; the plugin calls these subcommands to retrieve context).
 
   bean init                       Connection status + exact next steps (paths, fields, lists)
-  bean auth <provider> [--token]  google | slack | notion | github
+  bean auth <provider> [--token]  google | slack | github | …
   bean sync [source] [--rebuild] [--since N]
   bean search "question" [--source S] [--doc SUBSTR] [--k N] [--expand N]
   bean recent [--source S] [--doc SUBSTR] [--limit N]

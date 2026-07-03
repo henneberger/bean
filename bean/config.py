@@ -164,7 +164,7 @@ def set_in(cfg: dict, path: str, value) -> dict:
     """Set a dotted leaf, coercing value to the type of the existing default when there is one."""
     parts = path.split(".")
     ref = get(DEFAULTS, path, _MISSING)
-    # A per-source chunking override (e.g. `notion.chunking.lines`) has no baked-in default, so
+    # A per-source chunking override (e.g. `github.chunking.lines`) has no baked-in default, so
     # coerce it against the matching global `chunking` leaf instead.
     if ref is _MISSING and len(parts) >= 2 and parts[-2] == "chunking":
         ref = get(DEFAULTS, f"chunking.{parts[-1]}", _MISSING)

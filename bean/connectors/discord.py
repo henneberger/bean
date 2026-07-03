@@ -13,9 +13,9 @@ import time
 from datetime import datetime, timezone
 
 from . import slack  # reuse iso_week / week_start so chat sources bucket weeks identically
-from .http import api_json
-from .store import Store
-from .workspace import load_credential, save_credential
+from ..http import api_json
+from ..store import Store
+from ..workspace import load_credential, save_credential
 
 API = "https://discord.com/api/v10"
 DAY = 86400

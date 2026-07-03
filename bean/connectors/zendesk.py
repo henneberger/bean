@@ -12,10 +12,10 @@ from __future__ import annotations
 import base64
 import time
 
-from .html import html_to_text
-from .http import api_json
-from .store import Store
-from .workspace import load_credential, save_credential
+from ..html import html_to_text
+from ..http import api_json
+from ..store import Store
+from ..workspace import load_credential, save_credential
 
 DAY = 86400
 KINDS = ("tickets", "articles")

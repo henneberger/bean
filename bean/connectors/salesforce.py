@@ -8,10 +8,10 @@ from __future__ import annotations
 
 from urllib.parse import quote
 
-from .http import api_json
-from .store import Store
-from .html import html_to_text
-from .workspace import load_credential, save_credential
+from ..http import api_json
+from ..store import Store
+from ..html import html_to_text
+from ..workspace import load_credential, save_credential
 
 VERSION = "v59.0"
 ARTICLE_SOQL = ("SELECT Id,Title,Summary,UrlName,LastModifiedDate FROM Knowledge__kav "

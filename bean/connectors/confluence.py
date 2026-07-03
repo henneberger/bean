@@ -10,10 +10,10 @@ import base64
 import re
 from urllib.parse import urlencode
 
-from .http import api_json
-from .store import Store
-from .workspace import load_credential, save_credential
-from .html import html_to_text
+from ..http import api_json
+from ..store import Store
+from ..workspace import load_credential, save_credential
+from ..html import html_to_text
 
 CRED = "confluence"
 

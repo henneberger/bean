@@ -8,10 +8,10 @@ skipped. This source re-observes the whole collection each run and does not prun
 
 from __future__ import annotations
 
-from .html import html_to_text
-from .http import api_json
-from .store import Store
-from .workspace import load_credential, save_credential
+from ..html import html_to_text
+from ..http import api_json
+from ..store import Store
+from ..workspace import load_credential, save_credential
 
 API = "https://api.hubapi.com"
 APP = "https://app.hubspot.com"

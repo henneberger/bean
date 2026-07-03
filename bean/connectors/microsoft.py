@@ -24,11 +24,11 @@ from datetime import datetime, timezone
 from urllib.parse import urlencode
 
 from . import slack  # reuse ISO-week math for the Teams digest buckets
-from .html import html_to_text
-from .http import AuthError, api_get, api_json, api_json_post, api_post
-from .office import OFFICE_EXT, extract_office
-from .store import Store
-from .workspace import load_credential, save_credential
+from ..html import html_to_text
+from ..http import AuthError, api_get, api_json, api_json_post, api_post
+from ..office import OFFICE_EXT, extract_office
+from ..store import Store
+from ..workspace import load_credential, save_credential
 
 GRAPH = "https://graph.microsoft.com/v1.0"
 CLIENT_ID = "04b07795-8ddb-461a-bbee-02f9e1bf7b46"  # public Azure CLI client (no app registration)
@@ -227,7 +227,7 @@ def _download_text(it, fetch, ocr_cfg, log):
                 from pathlib import Path
                 return extract_office(Path(tmp))
             if ext in PDF_EXT:
-                from .pdf import extract_pdf
+                from ..pdf import extract_pdf
                 return extract_pdf(tmp, ocr_cfg, log=log)
         finally:
             os.unlink(tmp)

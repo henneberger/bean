@@ -10,7 +10,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-from .office import OFFICE_EXT
+from ..office import OFFICE_EXT
 
 # Liberal on prose/markup: Markdown variants, plain text, and the common lightweight-markup
 # formats. Deliberately excludes logs and source code — this source is for documents.
@@ -46,14 +46,14 @@ def _iter_files(paths):
 def _read(path: Path, ocr_cfg: dict, log) -> str | None:
     ext = path.suffix.lower()
     if ext in PDF_EXT:
-        from .pdf import extract_pdf
+        from ..pdf import extract_pdf
         try:
             return extract_pdf(path, ocr_cfg, log=log)
         except Exception as err:  # a single unreadable PDF must not abort the whole sync
             log(f"localfiles: {path.name} skipped ({err})")
             return None
     if ext in OFFICE_EXT:
-        from .office import extract_office
+        from ..office import extract_office
         try:
             return extract_office(path)
         except Exception as err:  # a malformed/encrypted doc must not abort the whole sync

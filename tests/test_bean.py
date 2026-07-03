@@ -24,7 +24,8 @@ from bean.http import AuthError, Response, api_get  # noqa: E402
 from bean.store import Store, content_hash  # noqa: E402
 from bean.chunks import chunk_text  # noqa: E402
 from bean.workspace import Workspace, save_credential, load_credential, bean_home  # noqa: E402
-from bean import gdocs, slack, config as cfgmod, localfiles, notion, github, pdf  # noqa: E402
+from bean import config as cfgmod, pdf  # noqa: E402
+from bean.connectors import gdocs, slack, localfiles, github  # noqa: E402
 from bean.index import search as lance_search  # noqa: E402
 from bean.sync import run_sync  # noqa: E402
 from bean.search import search as hybrid_search, recent, thread, neighbors  # noqa: E402
@@ -378,8 +379,8 @@ cfgmod.save_global({"chunking": {"lines": 60}, "notion": {"chunking": {"lines": 
 _cc2 = cfgmod.resolve()
 ok(cfgmod.chunking_for(_cc2, "gdocs")["lines"] == 60, "a global chunking change reaches sources without their own override")
 ok(cfgmod.chunking_for(_cc2, "notion")["lines"] == 8, "a per-source chunking override wins over the global block")
-g2 = cfgmod.load_global(); cfgmod.set_in(g2, "notion.chunking.lines", "12")
-ok(g2["notion"]["chunking"]["lines"] == 12, "config set coerces a per-source chunking leaf to int")
+g2 = cfgmod.load_global(); cfgmod.set_in(g2, "github.chunking.lines", "12")
+ok(g2["github"]["chunking"]["lines"] == 12, "config set coerces a per-source chunking leaf to int")
 cfgmod.save_global({})  # reset
 
 # -- lookback: connector-level config resolution ------------------------------------------------
@@ -396,8 +397,6 @@ ok("github" not in LOOKBACK_DEFAULTS and "notion" not in LOOKBACK_DEFAULTS,
 ok(route_add("#eng")[0].key == "slack", "#channel routes to slack")
 ok(route_add("https://docs.google.com/document/d/abcdefghij1234567890/edit")[0].key == "gdocs", "gdoc url → gdocs")
 ok(route_add("baidu/Unlimited-OCR")[0].key == "github" and route_add("baidu/Unlimited-OCR")[2] == "baidu/Unlimited-OCR", "owner/repo → github")
-ok(route_add("https://www.notion.so/Team-Wiki-0123456789abcdef0123456789abcdef")[0].key == "notion", "notion url → notion")
-ok(notion.parse_add("0123456789abcdef0123456789abcdef")[1] == "01234567-89ab-cdef-0123-456789abcdef", "notion id dashified")
 ok(route_add("/tmp/some/notes")[0].key == "localfiles", "path → localfiles")
 ok(route_add("garbage no ref") is None or route_add("garbage no ref")[0].key == "localfiles", "bare words don't crash routing")
 
@@ -730,27 +729,8 @@ ok("cred-a" not in str(credential_path("slack", None)), "credential_path is the 
 _pa = wa.dir / "credentials" / "github.json"
 ok(_pa.exists() and _stat.S_IMODE(_pa.stat().st_mode) == 0o600, "local credential stored in the workspace, mode 0600")
 
-# -- notion + github render (offline fakes) -----------------------------------------------------
-def nfetch(url, headers):
-    from urllib.parse import urlparse
-    path = urlparse(url).path
-    if path.endswith("/pages/01234567-89ab-cdef-0123-456789abcdef"):
-        return res(200, {"url": "https://notion.so/p", "last_edited_time": "t1",
-                         "properties": {"Name": {"type": "title", "title": [{"plain_text": "Runbook"}]}}})
-    if "/children" in path:
-        return res(200, {"results": [{"type": "paragraph", "has_children": False,
-                                      "paragraph": {"rich_text": [{"plain_text": "Restart the worker."}]}}],
-                         "has_more": False, "next_cursor": None})
-    return res(404, {})
-save_credential("notion", {"token": "secret_x"})
-nws = Workspace(repo("notion"))
-with Store(nws) as store:
-    nr = notion.sync(store, {"pages": ["01234567-89ab-cdef-0123-456789abcdef"]}, settings={}, fetch=nfetch)
-    ok(nr["changed"] == ["01234567-89ab-cdef-0123-456789abcdef"], "notion page ingested")
-    ok("Restart the worker." in store.get("notion", "01234567-89ab-cdef-0123-456789abcdef").body, "notion blocks rendered")
-
 # == new connectors (offline: fake fetch, real Store) ===========================================
-from bean import confluence, jira, zendesk, discord, microsoft, salesforce  # noqa: E402  (core)
+from bean.connectors import confluence, jira, zendesk, discord, microsoft, salesforce  # noqa: E402  (core)
 
 
 def check(name, fn):
@@ -873,7 +853,7 @@ for _name, _fn in [
     check(_name, _fn)
 
 # == Onyx-parity connectors (offline) ===========================================================
-from bean import hubspot  # noqa: E402  (core)
+from bean.connectors import hubspot  # noqa: E402  (core)
 
 
 def t_hubspot():
@@ -899,8 +879,8 @@ from bean import config as _cfg  # noqa: E402
 from bean.plugins import discover_sources  # noqa: E402
 
 core_keys = {s.key for s in _S.CORE_SOURCES}
-ok(core_keys == {"slack", "gdocs", "notion", "github", "confluence", "jira", "zendesk",
-                 "salesforce", "hubspot", "microsoft", "discord"}, "11 cloud core connectors")
+ok(core_keys == {"slack", "gdocs", "github", "confluence", "jira", "zendesk",
+                 "salesforce", "hubspot", "microsoft", "discord"}, "10 cloud core connectors")
 ok(_S.SOURCES[-1].key == "localfiles", "localfiles registered last (path catch-all)")
 
 # a drop-in plugin file: a standalone module exposing SOURCE

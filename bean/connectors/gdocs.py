@@ -16,10 +16,10 @@ import time
 from datetime import datetime, timedelta, timezone
 from urllib.parse import urlencode
 
-from .http import AuthError, api_get, api_json
-from .pdf import extract_pdf
-from .store import Store
-from .workspace import load_credential, save_credential
+from ..http import AuthError, api_get, api_json
+from ..pdf import extract_pdf
+from ..store import Store
+from ..workspace import load_credential, save_credential
 
 API = "https://www.googleapis.com/drive/v3"
 PDF_MIME = "application/pdf"

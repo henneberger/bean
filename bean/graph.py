@@ -16,18 +16,13 @@ def _before(sep: str):
     return lambda d: d.split(sep, 1)[0]
 
 
-# source -> (relationship, container-id extractor from the doc_id). Only sources whose id encodes a
-# meaningful container appear; everything else contributes just the authored_by edge (if any).
+# source -> (relationship, container-id extractor from the doc_id). Only the core sources whose id
+# encodes a meaningful container appear; everything else contributes just the authored_by edge.
 _CONTAINER: dict = {
     "github": ("in_repo", lambda d: re.split(r"[#:]", d, 1)[0]),      # owner/repo#12 / owner/repo:path
-    "gitlab": ("in_repo", _before("#")),                             # group/project#12
-    "bitbucket": ("in_repo", _before("#")),                          # workspace/repo#3
     "jira": ("in_project", lambda d: d.rsplit("-", 1)[0]),           # PROJ-123 -> PROJ
-    "linear": ("in_team", lambda d: d.rsplit("-", 1)[0]),            # TEAM-123 -> TEAM
     "slack": ("in_channel", _before("/")),                           # channel/2026-W01
     "discord": ("in_channel", _before("/")),
-    "zulip": ("in_stream", _before("/")),
-    "confluence": ("in_space", _before("/")) if False else None,     # page ids carry no space; skip
 }
 
 

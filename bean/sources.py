@@ -11,8 +11,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from . import (confluence, discord, gdocs, github, hubspot, jira, localfiles, microsoft, notion,
-               salesforce, slack, zendesk)
+from .connectors import (confluence, discord, gdocs, github, hubspot, jira, localfiles, microsoft,
+                         salesforce, slack, zendesk)
 from .workspace import load_credential
 
 
@@ -103,9 +103,6 @@ CORE_SOURCES: list[Source] = [
            auth_help="rides gcloud sign-in (no token)",
            connect=gdocs.connect, connected=gdocs.connected, interactive_auth=True,
            always_when_connected=True),
-    Source("notion", "notion", "Notion", ("pages",), notion.sync, notion.parse_add,
-           auth="notion", add_help="a Notion page URL or id", auth_help="--token secret_…",
-           connect=notion.connect, connected=notion.connected),
     Source("github", "github", "GitHub", ("repos",), github.sync, github.parse_add,
            auth="github", add_help="a repo as owner/name or a github.com URL", auth_help="--token ghp_…",
            connect=github.connect, connected=github.connected),
