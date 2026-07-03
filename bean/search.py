@@ -140,9 +140,8 @@ def search(ws, query: str, *, queries: list[str] | None = None, k: int | None = 
     qtexts = [query] + [q for q in (queries or []) if q and q.strip()]
 
     if embed_query_fn is None:
-        model = cfgmod.resolve(ws)["embedding"]["model"]
-        from .embed import embed_query as _eq
-        embed_query_fn = lambda q: _eq(q, model)  # noqa: E731
+        from .embed import query_embedder
+        embed_query_fn = query_embedder(cfgmod.resolve(ws)["embedding"])
 
     with Store(ws) as store:
         weighted: list[tuple] = []

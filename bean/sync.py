@@ -62,7 +62,7 @@ def run_sync(ws: Workspace, *, only: str | None = None, keys: set | None = None,
     settings = cfgmod.resolve(ws)
     if embed_fn is None:
         from .embed import embedder  # lazy: model load only when embedding
-        embed_fn = embedder(settings["embedding"]["model"], settings["embedding"]["batch_size"])
+        embed_fn = embedder(settings["embedding"])
 
     changed: list[tuple[str, str]] = []
     removed: list[tuple[str, str]] = []
@@ -119,7 +119,8 @@ def run_sync(ws: Workspace, *, only: str | None = None, keys: set | None = None,
                 if doc:
                     store.replace_edges(source, doc_id, implied_edges(doc))
 
-        store.set_state("embedding.model", settings["embedding"]["model"])
+        from .embed import identity
+        store.set_state("embedding.model", identity(settings["embedding"]))
         from datetime import datetime, timezone
         store.set_state("last_sync", datetime.now(timezone.utc).isoformat())
 

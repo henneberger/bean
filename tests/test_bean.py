@@ -408,7 +408,7 @@ ok(again["changed"] == [] and again["chunks"] == 0, "re-sync with no upstream ch
 
 # -- config layering + coercion -----------------------------------------------------------------
 base = cfgmod.resolve()
-ok(base["embedding"]["model"] == "BAAI/bge-small-en-v1.5", "defaults resolve with no config file")
+ok(base["embedding"]["model"] == "minishlab/potion-retrieval-32M", "defaults resolve with no config file")
 cfgmod.save_global({"embedding": {"model": "custom/model"}, "search": {"hybrid": False}})
 merged = cfgmod.resolve()
 ok(merged["embedding"]["model"] == "custom/model" and merged["chunking"]["lines"] == 40,
@@ -431,6 +431,22 @@ ok(cfgmod.chunking_for(_cc2, "notion")["lines"] == 8, "a per-source chunking ove
 g2 = cfgmod.load_global(); cfgmod.set_in(g2, "github.chunking.lines", "12")
 ok(g2["github"]["chunking"]["lines"] == 12, "config set coerces a per-source chunking leaf to int")
 cfgmod.save_global({})  # reset
+
+# -- pluggable embedder: built-in identity + a drop-in embedder module --------------------------
+from bean import embed as _embed  # noqa: E402
+ok(_embed.identity({"backend": "model2vec", "model": "minishlab/potion-retrieval-32M"})
+   == "model2vec:minishlab/potion-retrieval-32M", "identity names backend + model")
+ok(_embed.identity({"plugin": "/x/e.py"}) == "plugin:/x/e.py", "identity names a plugin")
+_edir = Path(tempfile.mkdtemp(prefix="bean-embed-"))
+(_edir / "e.py").write_text(
+    "def embed(texts):\n"
+    "    return [[float(len(t)), 1.0] for t in texts]\n"
+    "def embed_query(text):\n"
+    "    return [float(len(text)), 2.0]\n")
+_ef = _embed.embedder({"plugin": str(_edir / "e.py")})
+ok(_ef(["ab", "abc"]) == [[2.0, 1.0], [3.0, 1.0]], "a drop-in embedder plugin returns its own vectors")
+ok(_embed.query_embedder({"plugin": str(_edir / "e.py")})("abcd") == [4.0, 2.0],
+   "the plugin's embed_query is used for the query side")
 
 # -- lookback: connector-level config resolution ------------------------------------------------
 from bean.sources import LOOKBACK_DEFAULTS, _lookback  # noqa: E402

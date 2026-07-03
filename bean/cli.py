@@ -199,7 +199,8 @@ def cmd_status(ws: Workspace, args) -> int:
                           "indexed": counts.get(s.key, 0),
                           "lists": {name: node.get(name) or [] for name in s.lists}}
     print(f"workspace: {ws.dir}")
-    em = settings["embedding"]["model"]
+    from .embed import identity
+    em = identity(settings["embedding"])
     warn = "" if (not indexed_model or indexed_model == em) else f"  ⚠ index built with {indexed_model} — run `bean sync --rebuild`"
     print(f"embedding: {em}{warn}")
     sync_line = "never synced" if age is None else f"{age}d ago" + ("  ⚠ stale — run `bean sync`" if stale else "")

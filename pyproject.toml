@@ -11,7 +11,8 @@ dependencies = [
     "duckdb>=1.0",
     "lancedb>=0.15",   # vector store; bundles `lance` (pylance) — `table.to_lance()` feeds DuckDB
     "requests>=2.31",
-    "fastembed>=0.3",  # default embedder (ONNX/CPU); a custom embedder can be dropped in as a plugin
+    "model2vec>=0.3",  # default embedder (fast static/CPU); other backends/plugins are opt-in
+    "fastembed>=0.3",  # fastembed embedding backend + the optional cross-encoder reranker
     "pymupdf>=1.24",   # PDF: born-digital text + page rasterisation for the OCR backend
 ]
 

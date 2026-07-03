@@ -19,10 +19,17 @@ from .workspace import bean_home
 
 DEFAULTS: dict = {
     "embedding": {
-        # Any fastembed-supported model. Changing this needs a `bean sync --rebuild`; `bean status`
-        # warns when the index was built with a different model than this.
-        "model": "BAAI/bge-small-en-v1.5",
+        # How to turn text into vectors. Changing any of these needs a `bean sync --rebuild`;
+        # `bean status` warns when the index was built with a different embedder.
+        #   backend "model2vec" — fast static embedder (default), model = a minishlab/potion-* name.
+        #   backend "fastembed" — ONNX transformer, model = any fastembed name (e.g. BAAI/bge-*).
+        "backend": "model2vec",
+        "model": "minishlab/potion-retrieval-32M",
         "batch_size": 64,
+        # A drop-in embedder overrides backend/model: a .py path (or import path) exposing
+        # `embed(texts) -> list[list[float]]` (+ optional `embed_query(text)`). Most models need
+        # their own code; the plugin just returns vectors, so any library/API works. null = built-in.
+        "plugin": None,
     },
     # Global chunking defaults. Any source may override the whole block (or any leaf) with a
     # `chunking` sub-block in its own config (see `slack` below) — `chunking_for(cfg, source)`
