@@ -1,16 +1,12 @@
-"""Embeddings — pluggable, because most models need their own code and all bean wants back is a
-vector. Four ways to embed, resolved from `settings["embedding"]`:
+"""Embeddings — one built-in model, plus a code-plugin hook. Resolved from `settings["embedding"]`:
 
-  - backend "gguf" (DEFAULT): a quantized GGUF transformer run in-process via llama-cpp-python
-    (google/embeddinggemma-300M-Q8_0). Higher accuracy than a static embedder, still CPU-friendly
-    and fully local. `model` is a bare alias (e.g. `embeddinggemma-300M-Q8_0`), an
-    `hf:owner/repo/file.gguf` reference, or a path to a local .gguf file.
-  - backend "model2vec": a static token-lookup embedder (minishlab/potion-*). No transformer
-    forward pass, so it's ~100x faster on CPU than a transformer — the speed-first choice.
-  - backend "fastembed": an ONNX transformer (e.g. BAAI/bge-small-en-v1.5).
+  - the BUILT-IN (default): Qwen/Qwen3-Embedding-0.6B, run in-process as a quantized GGUF via
+    llama-cpp-python. Fully local, CPU-friendly, no API. There is no backend/model selection and no
+    fallback — if the model can't load, bean fails loudly rather than silently degrading.
   - a PLUGIN: set `embedding.plugin` to a .py path (or import path) exposing
-    `embed(texts) -> list[list[float]]` and optionally `embed_query(text) -> list[float]`. This
-    overrides backend/model, so any library / API / custom model works as long as it returns vectors.
+    `embed(texts) -> list[list[float]]` and optionally `embed_query(text) -> list[float]`. This is
+    how you swap in any other model — a static config value, never an environment variable. Most
+    models need their own code; the plugin just has to return vectors.
 
 Everything downstream takes an injectable embed function, so tests run with a deterministic fake and
 never load a model. `identity(emb)` names the active embedder so `status` can warn when the index was
@@ -22,6 +18,15 @@ import importlib
 import importlib.util
 from pathlib import Path
 
+# The single built-in embedder. Other models go through `embedding.plugin`, not a config switch.
+MODEL_ID = "Qwen/Qwen3-Embedding-0.6B"
+_GGUF_REPO = "Qwen/Qwen3-Embedding-0.6B-GGUF"
+_GGUF_FILE = "Qwen3-Embedding-0.6B-Q8_0.gguf"
+# Qwen3-Embedding is instruction-tuned on the query side: queries get a task instruction, documents
+# are embedded raw. Matching that asymmetry is what the model was trained for.
+_QUERY_INSTRUCT = ("Instruct: Given a search query, retrieve relevant passages that answer it\n"
+                   "Query: ")
+
 _cache: dict = {}
 
 
@@ -29,7 +34,7 @@ def identity(emb: dict) -> str:
     """A stable name for the configured embedder, stored with the index so a change is detectable."""
     if emb.get("plugin"):
         return f"plugin:{emb['plugin']}"
-    return f"{emb.get('backend', 'gguf')}:{emb.get('model', '')}"
+    return MODEL_ID
 
 
 def embedder(emb: dict):
@@ -45,108 +50,43 @@ def query_embedder(emb: dict):
 
 
 def _resolve(emb: dict):
-    key = (emb.get("plugin"), emb.get("backend"), emb.get("model"))
+    plugin = emb.get("plugin")
+    key = ("plugin", plugin) if plugin else ("builtin",)
     if key not in _cache:
-        if emb.get("plugin"):
-            _cache[key] = _Plugin(emb["plugin"])
+        if plugin:
+            _cache[key] = _Plugin(plugin)
         else:
-            backend = (emb.get("backend") or "gguf").lower()
-            model = emb.get("model") or _DEFAULT_MODEL.get(backend, "")
-            if backend == "gguf":
-                _cache[key] = _LlamaCpp(model)
-            elif backend == "model2vec":
-                _cache[key] = _Model2Vec(model)
-            elif backend == "fastembed":
-                _cache[key] = _Fastembed(model)
-            else:
-                raise RuntimeError(
-                    f"unknown embedding backend {backend!r} — use 'gguf', 'model2vec', 'fastembed', "
-                    "or point embedding.plugin at a module that returns vectors.")
+            _reject_legacy(emb)
+            _cache[key] = _Qwen3()
     return _cache[key]
 
 
-_DEFAULT_MODEL = {
-    "gguf": "embeddinggemma-300M-Q8_0",
-    "model2vec": "minishlab/potion-retrieval-32M",
-    "fastembed": "BAAI/bge-small-en-v1.5",
-}
-
-# Bare aliases → (HF repo, file) so a short `model` name resolves to a downloadable GGUF. Anything
-# not listed here is taken as an `hf:owner/repo/file.gguf` reference or a local .gguf path.
-_GGUF_ALIASES = {
-    "embeddinggemma-300M-Q8_0": ("ggml-org/embeddinggemma-300M-GGUF", "embeddinggemma-300M-Q8_0.gguf"),
-}
+def _reject_legacy(emb: dict) -> None:
+    """Fail loudly on stale `backend`/`model` config instead of silently ignoring it. The built-in
+    is Qwen3-only now; anything else goes through `embedding.plugin`."""
+    stale = [k for k in ("backend", "model") if emb.get(k)]
+    if stale:
+        raise RuntimeError(
+            f"embedding.{'/'.join(stale)} is set but no longer supported — the built-in embedder is "
+            f"fixed to {MODEL_ID}. Remove those keys, or point `embedding.plugin` at your own "
+            "embedder module (see bean/embed.py). Then run `bean sync --rebuild`.")
 
 
-class _LlamaCpp:
-    """A quantized GGUF embedder run in-process via llama-cpp-python. `name` is a bare alias, an
-    `hf:owner/repo/file.gguf` reference, or a path to a local .gguf file."""
-    def __init__(self, name: str):
+class _Qwen3:
+    """Qwen3-Embedding-0.6B as a quantized GGUF, run in-process via llama-cpp-python."""
+    def __init__(self):
         try:
             from llama_cpp import Llama
         except ImportError as err:
-            raise RuntimeError("the gguf backend needs `pip install llama-cpp-python`") from err
-        local, repo_id, filename = _resolve_gguf(name)
-        if local:
-            self.model = Llama(model_path=local, embedding=True, n_ctx=2048, verbose=False)
-        else:
-            self.model = Llama.from_pretrained(
-                repo_id=repo_id, filename=filename, embedding=True, n_ctx=2048, verbose=False)
+            raise RuntimeError("the built-in embedder needs `pip install llama-cpp-python`") from err
+        self.model = Llama.from_pretrained(
+            repo_id=_GGUF_REPO, filename=_GGUF_FILE, embedding=True, n_ctx=2048, verbose=False)
 
     def embed(self, texts, batch):
         return [list(map(float, v)) for v in self.model.embed(list(texts))]
 
     def query(self, text):
-        return self.embed([text], 1)[0]
-
-
-def _resolve_gguf(name: str):
-    """(local_path | None, repo_id, filename). A local .gguf path returns (path, None, None); a bare
-    alias or `hf:owner/repo/file.gguf` reference returns (None, repo, file) for HF download."""
-    if name in _GGUF_ALIASES:
-        return None, *_GGUF_ALIASES[name]
-    ref = name[3:] if name.startswith("hf:") else name
-    p = Path(ref).expanduser()
-    if not name.startswith("hf:") and p.suffix == ".gguf" and p.exists():
-        return str(p), None, None
-    parts = ref.split("/")
-    if len(parts) < 3 or not ref.endswith(".gguf"):
-        raise RuntimeError(
-            f"can't resolve gguf model {name!r} — use a known alias (e.g. 'embeddinggemma-300M-Q8_0'), "
-            "an 'hf:owner/repo/file.gguf' reference, or a path to a local .gguf file.")
-    return None, "/".join(parts[:2]), "/".join(parts[2:])
-
-
-class _Model2Vec:
-    def __init__(self, name: str):
-        try:
-            from model2vec import StaticModel
-        except ImportError as err:  # base dependency, but keep the message actionable
-            raise RuntimeError("the model2vec embedder needs `pip install model2vec`") from err
-        self.model = StaticModel.from_pretrained(name)
-
-    def embed(self, texts, batch):
-        return [list(map(float, v)) for v in self.model.encode(texts)]
-
-    def query(self, text):
-        return self.embed([text], 1)[0]
-
-
-class _Fastembed:
-    def __init__(self, name: str):
-        try:
-            from fastembed import TextEmbedding
-        except ImportError as err:
-            raise RuntimeError("the fastembed backend needs `pip install fastembed`") from err
-        self.model = TextEmbedding(model_name=name)
-
-    def embed(self, texts, batch):
-        return [list(map(float, v)) for v in self.model.embed(texts, batch_size=batch)]
-
-    def query(self, text):
-        if hasattr(self.model, "query_embed"):
-            return list(map(float, next(iter(self.model.query_embed([text])))))
-        return self.embed([text], 1)[0]
+        return self.embed([_QUERY_INSTRUCT + text], 1)[0]
 
 
 class _Plugin:

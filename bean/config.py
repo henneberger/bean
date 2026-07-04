@@ -6,7 +6,7 @@ Three layers, deep-merged in order (later wins):
   2. global config     — ~/.bean/config.json (per user; embedding model, chunking, OCR…).
   3. workspace settings — the "settings" block of a repo's config.json (per-repo overrides).
 
-`resolve(ws)` returns the merged dict. `get(cfg, "embedding.model")` and the `bean config`
+`resolve(ws)` returns the merged dict. `get(cfg, "embedding.plugin")` and the `bean config`
 CLI walk it by dotted path so any leaf is reachable without special-casing. Secrets never live
 here — tokens stay in ~/.bean/credentials/ (mode 0600)."""
 
@@ -19,19 +19,15 @@ from .workspace import bean_home
 
 DEFAULTS: dict = {
     "embedding": {
-        # How to turn text into vectors. Changing any of these needs a `bean sync --rebuild`;
-        # `bean status` warns when the index was built with a different embedder.
-        #   backend "gguf" — quantized GGUF transformer (default) via llama-cpp-python; model = a
-        #     bare alias (embeddinggemma-300M-Q8_0), an hf:owner/repo/file.gguf ref, or a .gguf path.
-        #     Alternative: hf:Qwen/Qwen3-Embedding-0.6B-GGUF/Qwen3-Embedding-0.6B-Q8_0.gguf
-        #   backend "model2vec" — fast static embedder, model = a minishlab/potion-* name.
-        #   backend "fastembed" — ONNX transformer, model = any fastembed name (e.g. BAAI/bge-*).
-        "backend": "gguf",
-        "model": "embeddinggemma-300M-Q8_0",
+        # How to turn text into vectors. The one built-in embedder is Qwen/Qwen3-Embedding-0.6B, run
+        # in-process as a quantized GGUF via llama-cpp-python — fully local, CPU-friendly, no API.
+        # There is no backend/model switch and no fallback: if it can't load, bean fails loudly.
+        # Changing embedders needs a `bean sync --rebuild`; `bean status` warns when the index was
+        # built with a different one.
         "batch_size": 64,
-        # A drop-in embedder overrides backend/model: a .py path (or import path) exposing
-        # `embed(texts) -> list[list[float]]` (+ optional `embed_query(text)`). Most models need
-        # their own code; the plugin just returns vectors, so any library/API works. null = built-in.
+        # To use any other model, point `plugin` at your own code: a .py path (or import path)
+        # exposing `embed(texts) -> list[list[float]]` (+ optional `embed_query(text)`). A static
+        # config value, never an environment variable. null = the built-in Qwen3 embedder.
         "plugin": None,
     },
     # Global chunking defaults. Any source may override the whole block (or any leaf) with a

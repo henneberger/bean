@@ -153,7 +153,7 @@ ask. Still answer their question from the current index; just flag that it may b
 - `bean.py status` — connections, tracked sources, index counts, embedding model (warns
   if the index was built with a different model than configured).
 - `bean.py config list` — resolved settings. `config get <path>` / `config set <path> <value>` for
-  `embedding.model`, `chunking.lines`, `search.hybrid`, `ocr.backend`, etc. Chunking is
+  `embedding.plugin`, `chunking.lines`, `search.hybrid`, `ocr.backend`, etc. Chunking is
   **per-source**: a global `chunking` block plus optional `<source>.chunking` overrides merged on
   top (Slack ships smaller defaults for short chat) — set one with e.g.
   `bean.py config set slack.chunking.lines 15`. Changing the embedding model or chunking prints a
