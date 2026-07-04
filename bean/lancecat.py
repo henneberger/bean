@@ -13,11 +13,7 @@ SCHEMAS = {
     "documents": pa.schema([("source", pa.string()), ("doc_id", pa.string()), ("title", pa.string()),
         ("url", pa.string()), ("revision_id", pa.string()), ("hash", pa.string()), ("body", pa.string()),
         ("created_at", _TS), ("modified_at", _TS), ("author", pa.string()), ("mime", pa.string()),
-        ("fetched_at", _TS),
-        # Sync checkpoint (Task 1.4 removes it): holds the content hash whose chunks are actually in
-        # Lance, so a doc still needs embedding whenever embedded_hash != hash (or is NULL) — which
-        # survives an interrupted sync and lets it resume without re-embedding what's already done.
-        ("embedded_hash", pa.string())]),
+        ("fetched_at", _TS)]),
     "revisions": pa.schema([("source", pa.string()), ("doc_id", pa.string()),
         ("revision_id", pa.string()), ("hash", pa.string()), ("fetched_at", _TS)]),
     "edges": pa.schema([("source", pa.string()), ("src_doc", pa.string()), ("rel", pa.string()),

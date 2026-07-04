@@ -17,13 +17,11 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 
 import duckdb
+import pyarrow as pa
 
 from .lancecat import Catalog
 
 STATE_SCHEMA = "CREATE TABLE IF NOT EXISTS state (key TEXT PRIMARY KEY, value TEXT)"
-
-_DOC_COLS = ("source", "doc_id", "title", "url", "revision_id", "hash", "body",
-             "created_at", "modified_at", "author", "mime", "fetched_at")
 
 
 def content_hash(text: str) -> str:
@@ -65,6 +63,12 @@ class Store:
         # documents/revisions/edges now live on the Catalog's Lance datasets.
         self._state = duckdb.connect(str(ws.db_path))
         self._state.execute(STATE_SCHEMA)
+        # Private embed checkpoint (out of the shared catalog — see Task 1.4): holds the content
+        # hash whose chunks are actually in Lance, per (source, doc_id), so a doc still needs
+        # embedding whenever embedded_hash != hash (or is NULL) — survives an interrupted sync
+        # and lets it resume without re-embedding what's already done.
+        self._state.execute("CREATE TABLE IF NOT EXISTS embedded ("
+                            "source TEXT, doc_id TEXT, embedded_hash TEXT, PRIMARY KEY (source, doc_id))")
 
     def close(self):
         self._state.close()
@@ -100,7 +104,7 @@ class Store:
         con = self.cat.duck()
         try:
             existing = con.execute(
-                "SELECT hash, embedded_hash FROM documents WHERE source=? AND doc_id=?",
+                "SELECT hash FROM documents WHERE source=? AND doc_id=?",
                 [source, doc_id]).fetchone()
         finally:
             con.close()
@@ -109,10 +113,8 @@ class Store:
                "created_at": created_at, "modified_at": modified_at, "author": author,
                "mime": mime, "fetched_at": now}
         if existing and existing[0] == h:
-            row["embedded_hash"] = existing[1]  # metadata-only change: keep the embed checkpoint
-            self.cat.upsert_documents([row])
+            self.cat.upsert_documents([row])  # metadata-only change: embed checkpoint untouched
             return False
-        row["embedded_hash"] = None  # content changed: needs re-embedding
         self.cat.upsert_documents([row])
         self.cat.append_revisions([{"source": source, "doc_id": doc_id,
                                     "revision_id": revision_id, "hash": h, "fetched_at": now}])
@@ -135,41 +137,48 @@ class Store:
     def embed_queue(self, sources=None, *, force: bool = False) -> list[tuple[str, str]]:
         """(source, doc_id) pairs that still need embedding, OLDEST FIRST (by the doc's own
         timestamp) so a checkpoint means 'everything older is done'. `force` (a --rebuild) returns
-        every doc; otherwise only docs whose embedded chunks are missing or stale (embedded_hash !=
-        hash) — which naturally includes anything an interrupted sync left half-done."""
+        every doc; otherwise only docs whose embedded chunks are missing or stale (private
+        embedded_hash != hash) — which naturally includes anything an interrupted sync left
+        half-done. The checkpoint lives in the private local DuckDB (`embedded`, on `self._state`)
+        joined here against the shared catalog's `documents`. Note: ATTACH-ing `ws.db_path` (the
+        private DuckDB file) onto a *second* connection doesn't work here — `self._state` already
+        holds that same file open read-write in this process, and DuckDB refuses a second handle
+        onto one database file ("Unique file handle conflict"). So instead we register the Lance
+        `documents` dataset as a view directly on `self._state` (registering an external dataset is
+        unrelated to ATTACH-ing a database file) and join against the local `embedded` table there."""
         where = ["1=1"]
         params: list = []
         if sources is not None:
             marks = ",".join("?" * len(sources)) or "NULL"
-            where.append(f"source IN ({marks})")
+            where.append(f"d.source IN ({marks})")
             params += list(sources)
-        if not force:
-            where.append("(embedded_hash IS NULL OR embedded_hash <> hash)")
-        con = self.cat.duck()
+        join_pred = "" if force else \
+            "AND (e.embedded_hash IS NULL OR e.embedded_hash <> d.hash)"
+        t = self.cat._table("documents")
+        lance_view = t.to_lance() if t is not None else \
+            pa.Table.from_pylist([], schema=Catalog.SCHEMAS["documents"])
+        self._state.register("_cat_documents", lance_view)
         try:
-            return [(r[0], r[1]) for r in con.execute(
-                f"SELECT source, doc_id FROM documents WHERE {' AND '.join(where)} "
-                "ORDER BY COALESCE(modified_at, fetched_at) ASC, doc_id ASC", params).fetchall()]
+            rows = self._state.execute(
+                f"SELECT d.source, d.doc_id FROM _cat_documents d "
+                f"LEFT JOIN embedded e ON d.source=e.source AND d.doc_id=e.doc_id "
+                f"WHERE {' AND '.join(where)} {join_pred} "
+                "ORDER BY COALESCE(d.modified_at, d.fetched_at) ASC, d.doc_id ASC", params).fetchall()
+            return [(r[0], r[1]) for r in rows]
         finally:
-            con.close()
+            self._state.unregister("_cat_documents")
 
     def mark_embedded(self, source: str, doc_id: str) -> None:
-        """Checkpoint one doc: its current content is now embedded in Lance. Reads the doc row back
-        and rewrites embedded_hash=hash through the Catalog (a Lance-registered view is read-only,
-        so this can't be a DuckDB UPDATE) — durable immediately, so an interrupted sync resumes
-        from exactly here."""
-        con = self.cat.duck()
-        try:
-            row = con.execute(
-                f"SELECT {', '.join(_DOC_COLS)} FROM documents WHERE source=? AND doc_id=?",
-                [source, doc_id]).fetchone()
-        finally:
-            con.close()
-        if row is None:
+        """Checkpoint one doc: its current content is now embedded in Lance. Reads the doc's current
+        hash and upserts it into the private `embedded` table — durable immediately, so an
+        interrupted sync resumes from exactly here."""
+        d = self.get(source, doc_id)
+        if d is None:
             return
-        d = dict(zip(_DOC_COLS, row))
-        d["embedded_hash"] = d["hash"]
-        self.cat.upsert_documents([d])
+        self._state.execute(
+            "INSERT INTO embedded (source, doc_id, embedded_hash) VALUES (?, ?, ?) "
+            "ON CONFLICT (source, doc_id) DO UPDATE SET embedded_hash = excluded.embedded_hash",
+            [source, doc_id, d.hash])
 
     def counts(self) -> dict[str, int]:
         con = self.cat.duck()

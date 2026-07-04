@@ -444,7 +444,7 @@ _SQL_SCHEMA = """bean stores documents/revisions/edges/chunks in a Lance catalog
 
 TABLES
   documents(source, doc_id, title, url, revision_id, hash, body,
-            created_at, modified_at, author, mime, fetched_at, embedded_hash)
+            created_at, modified_at, author, mime, fetched_at)
       one row per indexed document. created_at/modified_at are the doc's OWN timestamps at the
       source; `author` is source-native. A Google Doc comment is its own row: doc_id
       '<fileId>#comment:<id>', author = the commenter, modified_at = last activity.
