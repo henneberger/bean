@@ -50,6 +50,11 @@ workspace.
    only after commit) plus content-hash idempotency.
 7. **Private plane stays local, never shared.** Sync cursors and credentials are per-writer bookkeeping
    (they encode each writer's *visibility*, which differs). They stay in a small local store.
+8. **One storage format for local and cloud mode.** Local-only mode ALSO stores the four datasets as
+   Lance (at the same `~/.bean/<repo>/` paths a cloud workspace uses for its mirror) — there is one
+   `Store` implementation, not a DuckDB backend for local and a Lance backend for cloud. "Local mode
+   untouched" means *behavior* (commands, retrieval semantics, no S3 involvement), not file format.
+   Existing local workspaces are format-migrated in place on first use after upgrade (see Migration).
 
 ## Architecture
 
@@ -109,13 +114,17 @@ is the target. Do not ship assuming it — verify against a real (or moto/minio)
 2. **Fetch** — each active source fetches using its **private local cursor**, producing candidate
    doc snapshots (in-run staging, not persisted to the shared store yet).
 3. **Diff** — a candidate is *changed* when the shared `documents` dataset has no row for
-   `(source, doc_id)` or its stored `hash` differs. Unchanged docs are skipped (no embed, no commit;
-   a metadata-only refresh may still update non-content fields, matching today's `upsert` returning
-   `False`).
+   `(source, doc_id)` or its stored `hash` differs. Hash-unchanged docs are skipped **entirely** —
+   no embed and **no commit**: unlike today's metadata-only UPDATE on every sync, a metadata-only
+   refresh is not written to the shared store (rewriting fragments for unchanged content every sync
+   is pure churn). Metadata catches up on the doc's next real content change.
 4. **Embed** — chunk + embed each changed doc; compute and store `ord` per chunk.
-5. **Commit-together** — write `chunks` then `documents` (+ append `revisions`, replace `edges`)
-   as immutable Lance commits. Post-embed only, so no un-embedded doc ever lands.
-6. **Advance cursor** — the private cursor for that source advances **only after its commit
+5. **Commit-together, batched per source** — after a source's changed set is embedded, write its
+   `chunks` then `documents` (+ append `revisions`, replace `edges`) as **one commit set per source
+   per sync run**, not per doc. Per-doc commits would mean hundreds of S3 conditional-write rounds
+   per sync (version churn, request cost, wider conflict windows); per-source batching aligns with
+   cursor granularity. Post-embed only, so no un-embedded doc ever lands.
+6. **Advance cursor** — the private cursor for that source advances **only after its commit set
    succeeds**.
 
 Deletions: coarse and config-driven (dropping a repo/channel/source from config removes its docs),
@@ -139,7 +148,9 @@ chunks" — that state is gone with `embedded_hash`.
 ## Components (code seam)
 
 - **`bean/remote.py`** (new) — S3↔local replication and provisioning:
-  - `pull(ws)` — fast-forward the local mirror from S3 (immutable additive file copy).
+  - `pull(ws)` — fast-forward the local mirror from S3 (immutable additive file copy). **Ordering:
+    copy data/fragment files first, manifests last** — a manifest must never be visible locally
+    before every file it references, or a concurrent local read sees a broken version.
   - commit helpers — perform Lance immutable commits against the S3-backed datasets with
     conditional-write concurrency + bounded retry-on-conflict.
   - `cloud_init(ws, bucket, prefix, region)` — provision a writer: create the datasets, upload any
@@ -211,10 +222,17 @@ chunks" — that state is gone with `embedded_hash`.
 
 ## Migration
 
-`bean cloud init` reads the existing local `bean.duckdb` (`documents` / `revisions` / `edges`) and
-`lance/` chunks and writes them into the S3 Lance datasets as the initial commit (computing `ord`,
-dropping `embedded_hash`). Opt-in per workspace; local-only users are unaffected. A workspace stays
-local until `bean cloud init` / `bean cloud connect` is run.
+Two distinct migrations:
+
+- **Local format migration (automatic, everyone).** Because local mode also adopts the four-Lance-
+  dataset layout (decision 8), an existing workspace's `bean.duckdb` tables (`documents` /
+  `revisions` / `edges`) are converted to local Lance datasets on first use after upgrade —
+  in place, computing `ord` into `chunks`, dropping `embedded_hash`, preserving the `state` table
+  as the private local store. One-way, idempotent, no user action; the old tables are left in the
+  DuckDB file (which remains, holding only private `state`) until a later cleanup.
+- **Cloud adoption (opt-in).** `bean cloud init` uploads the (already-Lance) local datasets to
+  `s3://<bucket>/<prefix>/` as the initial commit. A workspace stays local until
+  `bean cloud init` / `bean cloud connect` is run.
 
 ## Limitations (v1)
 
