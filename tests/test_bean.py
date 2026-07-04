@@ -1176,5 +1176,21 @@ with Store(_ordws) as store:
     _ch = store.neighbors("gdocs", "o1", 0, 999)
 ok([c["ord"] for c in _ch] == list(range(len(_ch))), "stored ord is a dense 0-based sequence per doc")
 
+# legacy DuckDB catalog is migrated into Lance on first open
+_mig = Workspace(repo("migrate"))
+import duckdb as _dd
+_c = _dd.connect(str(_mig.db_path))
+_c.execute("CREATE TABLE documents (source TEXT, doc_id TEXT, title TEXT, url TEXT, revision_id TEXT, "
+           "hash TEXT, body TEXT, created_at TIMESTAMP, modified_at TIMESTAMP, author TEXT, mime TEXT, "
+           "fetched_at TIMESTAMP, embedded_hash TEXT)")
+_c.execute("INSERT INTO documents VALUES ('gdocs','dz','T','u','r','h','body here',NULL,NULL,'Ada',NULL,now(),'h')")
+_c.execute("CREATE TABLE revisions (source TEXT, doc_id TEXT, revision_id TEXT, hash TEXT, fetched_at TIMESTAMP)")
+_c.execute("CREATE TABLE edges (source TEXT, src_doc TEXT, rel TEXT, dst_kind TEXT, dst TEXT)")
+_c.close()
+with Store(_mig) as s:
+    ok(s.get("gdocs", "dz") is not None and s.get("gdocs", "dz").author == "Ada", "legacy doc migrated to Lance")
+with Store(_mig) as s:
+    ok(s.counts().get("gdocs") == 1, "second open is a no-op (no double-migration)")
+
 print(f"bean: {CHECKS - FAILED}/{CHECKS} checks passed" if FAILED == 0 else f"bean: {FAILED}/{CHECKS} checks FAILED")
 sys.exit(0 if FAILED == 0 else 1)

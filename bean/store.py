@@ -69,6 +69,65 @@ class Store:
         # and lets it resume without re-embedding what's already done.
         self._state.execute("CREATE TABLE IF NOT EXISTS embedded ("
                             "source TEXT, doc_id TEXT, embedded_hash TEXT, PRIMARY KEY (source, doc_id))")
+        self._migrate_legacy_catalog()
+
+    def _migrate_legacy_catalog(self) -> None:
+        """One-time upgrade path: an OLD bean kept documents/revisions/edges as real tables in the
+        private DuckDB (`ws.db_path`); this Lance-backed Store expects them on the Catalog instead.
+        Detect a legacy `documents` TABLE sitting in `self._state`'s own catalog (NOT the read-only
+        `documents` VIEW that `Catalog.duck()` registers on a *different*, throwaway connection —
+        that view never appears in `self._state`'s information_schema, so a base-table check here
+        can't collide with it) and, if the Lance catalog hasn't already been populated, copy the rows
+        across once and drop the legacy tables. Guarded additionally by a `catalog_migrated` state
+        flag so a workspace that's already been migrated (and thus has legacy tables long gone) is
+        never re-scanned. `embedded_hash` is deliberately DROPPED, not carried over: the old chunk
+        vectors lived in a different Lance location with no `ord` column and are not migrated, so the
+        new catalog has documents but no chunks. Leaving the private `embedded` checkpoint empty makes
+        `embed_queue` correctly return every migrated doc as needing embedding, so the next sync
+        re-embeds them into the new chunk dataset — carrying `embedded_hash` over would make
+        `embed_queue` skip those docs and searches would return nothing for them."""
+        if self.get_state("catalog_migrated"):
+            return
+        has_legacy = self._state.execute(
+            "SELECT count(*) FROM duckdb_tables() WHERE table_name = 'documents'").fetchone()[0] > 0
+        if not has_legacy:
+            self.set_state("catalog_migrated", True)
+            return
+        cat_populated = self.cat._table("documents") is not None and self.cat._table("documents").count_rows() > 0
+        if cat_populated:
+            # Lance catalog already has documents (e.g. a manual/partial prior migration) — don't
+            # clobber it with the legacy rows; just drop the now-redundant legacy tables and stop.
+            self._state.execute("DROP TABLE documents")
+            self._state.execute("DROP TABLE revisions")
+            self._state.execute("DROP TABLE edges")
+            self.set_state("catalog_migrated", True)
+            return
+        docs = self._state.execute(
+            "SELECT source, doc_id, title, url, revision_id, hash, body, created_at, modified_at, "
+            "author, mime, fetched_at FROM documents").fetchall()
+        doc_cols = ["source", "doc_id", "title", "url", "revision_id", "hash", "body", "created_at",
+                    "modified_at", "author", "mime", "fetched_at"]
+        revs = self._state.execute(
+            "SELECT source, doc_id, revision_id, hash, fetched_at FROM revisions").fetchall()
+        rev_cols = ["source", "doc_id", "revision_id", "hash", "fetched_at"]
+        edges = self._state.execute(
+            "SELECT source, src_doc, rel, dst_kind, dst FROM edges").fetchall()
+        edge_cols = ["source", "src_doc", "rel", "dst_kind", "dst"]
+        if docs:
+            self.cat.upsert_documents([dict(zip(doc_cols, r)) for r in docs])
+        if revs:
+            self.cat.append_revisions([dict(zip(rev_cols, r)) for r in revs])
+        by_src_doc: dict = {}
+        for r in edges:
+            row = dict(zip(edge_cols, r))
+            by_src_doc.setdefault((row["source"], row["src_doc"]), []).append(
+                {"rel": row["rel"], "dst_kind": row["dst_kind"], "dst": row["dst"]})
+        for (source, src_doc), rows in by_src_doc.items():
+            self.cat.replace_edges(source, src_doc, rows)
+        self._state.execute("DROP TABLE documents")
+        self._state.execute("DROP TABLE revisions")
+        self._state.execute("DROP TABLE edges")
+        self.set_state("catalog_migrated", True)
 
     def close(self):
         self._state.close()
