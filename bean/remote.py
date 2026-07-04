@@ -14,6 +14,7 @@ import subprocess
 from pathlib import Path
 
 _MANIFEST_MARKER = "/_versions/"
+_MANIFEST_GLOB = f"*{_MANIFEST_MARKER}*"
 
 
 def pull(ws) -> None:
@@ -34,15 +35,24 @@ def _copy_new(remote_uri: str, local_dir: Path) -> None:
         _copy_new_local(Path(remote_uri), local_dir)
 
 
+def _s3_sync_commands(remote_uri: str, local_dir: Path) -> list[list[str]]:
+    """Build the two `aws s3 sync` argv lists that copy data files before manifests.
+
+    Pass 1: everything except manifests, so data/fragment files land before the manifests that
+    reference them. Pass 2: manifests only — `--exclude "*"` first is required, since a bare
+    `--include` is a no-op in the AWS CLI (sync includes everything by default; `--include` only
+    re-adds files a prior `--exclude` removed). `aws s3 sync` already skips unchanged files."""
+    base = ["aws", "s3", "sync", remote_uri, str(local_dir)]
+    pass1 = [*base, "--exclude", _MANIFEST_GLOB, "--only-show-errors"]
+    pass2 = [*base, "--exclude", "*", "--include", _MANIFEST_GLOB, "--only-show-errors"]
+    return [pass1, pass2]
+
+
 def _copy_new_s3(remote_uri: str, local_dir: Path) -> None:
     if shutil.which("aws") is None:
         raise RuntimeError("remote.pull needs the `aws` CLI on PATH (s3 sync) but it was not found")
-    # Pass 1: everything except manifests, so data/fragment files land before the manifests that
-    # reference them. Pass 2: manifests only. `aws s3 sync` already skips unchanged files.
-    subprocess.run(["aws", "s3", "sync", remote_uri, str(local_dir),
-                     "--exclude", "*/_versions/*", "--only-show-errors"], check=True)
-    subprocess.run(["aws", "s3", "sync", remote_uri, str(local_dir),
-                     "--include", "*/_versions/*", "--only-show-errors"], check=True)
+    for cmd in _s3_sync_commands(remote_uri, local_dir):
+        subprocess.run(cmd, check=True)
 
 
 def _copy_new_local(remote_dir: Path, local_dir: Path) -> None:

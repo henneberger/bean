@@ -1277,5 +1277,20 @@ _pullws_off = Workspace(repo("pull-off"))
 _remote.pull(_pullws_off)  # must not raise, must not touch replica_dir
 ok(not (_pullws_off.replica_dir / "documents.lance").exists(), "pull() no-ops for a non-cloud workspace")
 
+# _s3_sync_commands: pure argv builder for the two `aws s3 sync` passes, unit-testable without
+# ever running `aws` or touching S3. Pass 2 must exclude-then-include, since a bare --include
+# with no preceding --exclude "*" is a no-op in the AWS CLI (it would re-sync everything, letting
+# manifests race data files instead of always landing last).
+_cmds = _remote._s3_sync_commands("s3://b/p", Path("/tmp/x"))
+ok(len(_cmds) == 2, "_s3_sync_commands returns exactly two passes")
+ok(_cmds[0][:4] == ["aws", "s3", "sync", "s3://b/p"], "pass 1 starts with aws s3 sync <remote>")
+ok(_cmds[1][:4] == ["aws", "s3", "sync", "s3://b/p"], "pass 2 starts with aws s3 sync <remote>")
+ok("--exclude" in _cmds[0] and "*/_versions/*" in _cmds[0], "pass 1 excludes the manifest glob")
+ok("--include" not in _cmds[0], "pass 1 has no --include (would be meaningless without one)")
+ok("--exclude" in _cmds[1] and "*" in _cmds[1], "pass 2 excludes everything by default")
+ok("--include" in _cmds[1] and "*/_versions/*" in _cmds[1], "pass 2 re-includes only the manifest glob")
+ok(_cmds[1].index("--exclude") < _cmds[1].index("--include"),
+   "pass 2's --exclude precedes --include, the only ordering that makes the include filter")
+
 print(f"bean: {CHECKS - FAILED}/{CHECKS} checks passed" if FAILED == 0 else f"bean: {FAILED}/{CHECKS} checks FAILED")
 sys.exit(0 if FAILED == 0 else 1)
