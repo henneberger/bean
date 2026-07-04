@@ -7,6 +7,8 @@ You already pay for a Claude plan, so why pay again for API calls? Or hand your 
 LLM-wrapper SaaS? Not ready to drop $100k on search? bean has no server: it pulls with your own
 credentials, embeds on your machine, and stores everything locally.
 
+![bean in Claude Code — one question composes recent + search across Slack and Google Docs, and cites every source](assets/demo.png)
+
 ## Install
 
 In Claude Code, add this repo as a plugin marketplace, then install the plugin. Run the two
