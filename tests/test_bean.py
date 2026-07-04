@@ -1166,5 +1166,15 @@ ok(_rows == [("T2", "h2", "beta body")], "Lance upsert updates in place, queried
 _cat.delete_documents("gdocs", ["d1"])
 ok(_cat.duck().execute("SELECT count(*) FROM documents").fetchone()[0] == 0, "Lance delete removes the row")
 
+# ord is stored, not derived
+_ordws = Workspace(repo("ord"))
+with Store(_ordws) as store:
+    store.upsert("gdocs", "o1", title="O", url=None, revision_id=None,
+                 body="\n".join(f"line {i} of content here about a topic" for i in range(120)))
+reembed(_ordws, embed_fn=fake_embed)
+with Store(_ordws) as store:
+    _ch = store.neighbors("gdocs", "o1", 0, 999)
+ok([c["ord"] for c in _ch] == list(range(len(_ch))), "stored ord is a dense 0-based sequence per doc")
+
 print(f"bean: {CHECKS - FAILED}/{CHECKS} checks passed" if FAILED == 0 else f"bean: {FAILED}/{CHECKS} checks FAILED")
 sys.exit(0 if FAILED == 0 else 1)

@@ -189,10 +189,10 @@ class Store:
             con.close()
 
     # -- chunk queries: DuckDB SQL run directly over the single Lance chunk dataset ----------------
-    # `ord` (a chunk's position within its document) is derived from line order; the coarse
-    # doc-level "…-large" chunks are excluded so numbering matches the base chunks.
-    _BASE = ("SELECT id, source, doc_id, title, url, start, \"end\", text, "
-             "row_number() OVER (PARTITION BY source, doc_id ORDER BY start) - 1 AS ord "
+    # `ord` (a chunk's 0-based position within its document, among base chunks) is stored at embed
+    # time by `reindex_doc`; the coarse doc-level "…-large" chunks carry `ord = NULL` and are
+    # excluded here so numbering matches the base chunks.
+    _BASE = ("SELECT id, source, doc_id, title, url, start, \"end\", text, ord "
              "FROM _chunks WHERE id NOT LIKE '%-large'")
 
     def _chunk_rows(self, select_sql: str, params: list) -> list[dict]:

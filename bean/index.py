@@ -32,16 +32,27 @@ def reindex_doc(ws, *, source: str, doc_id: str, title: str, url: str | None,
     """Replace every chunk row for one document (delete + add). Idempotent per snapshot."""
     db = _db(ws)
     tbl = _table(db)
-    rows = [
-        {"id": c.id, "source": source, "doc_id": doc_id, "title": title, "url": url or "",
-         "start": c.start, "end": c.end, "text": c.text, "vector": v}
-        for c, v in zip(chunks, vectors) if v
-    ]
+    rows = []
+    ord_ctr = 0
+    for c, v in zip(chunks, vectors):
+        if not v:
+            continue
+        # base chunks are numbered 0,1,2,… in `start` order (the order `chunks` arrives in); the
+        # coarse doc-level "…-large" chunks get `ord = None` and are excluded by `_BASE`'s filter.
+        is_large = c.id.endswith("-large")
+        rows.append({"id": c.id, "source": source, "doc_id": doc_id, "title": title,
+                     "url": url or "", "start": c.start, "end": c.end, "text": c.text,
+                     "vector": v, "ord": None if is_large else ord_ctr})
+        if not is_large:
+            ord_ctr += 1
     # An embedding-model swap changes the vector width; the existing table's fixed-size vector
     # column can't hold the new vectors (Lance raises on the cast). A dimension change requires a
     # `--rebuild`, which re-embeds every doc — so drop the stale table and let it be recreated at
-    # the new width on the first write below.
-    if tbl is not None and rows and _vector_dim(tbl) not in (None, len(rows[0]["vector"])):
+    # the new width on the first write below. An older bean's `chunks` table also predates the
+    # `ord` column; adding rows with `ord` to it would be a schema mismatch, so treat a missing
+    # `ord` field the same way — drop and let it be recreated with the current schema.
+    if tbl is not None and rows and (_vector_dim(tbl) not in (None, len(rows[0]["vector"]))
+                                      or "ord" not in tbl.schema.names):
         db.drop_table(TABLE)
         tbl = None
     if tbl is not None:
