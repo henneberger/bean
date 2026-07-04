@@ -445,7 +445,7 @@ cfgmod.save_global({})  # reset
 
 # -- one built-in embedder + a drop-in embedder module ------------------------------------------
 from bean import embed as _embed  # noqa: E402
-ok(_embed.identity({}) == "Qwen/Qwen3-Embedding-0.6B", "identity names the single built-in model")
+ok(_embed.identity({}) == "jinaai/jina-embeddings-v5-text-nano", "identity names the single built-in model")
 ok(_embed.identity({"plugin": "/x/e.py"}) == "plugin:/x/e.py", "identity names a plugin")
 try:
     _embed._resolve({"backend": "model2vec", "model": "minishlab/potion-retrieval-32M"})

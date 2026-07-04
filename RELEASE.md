@@ -74,16 +74,17 @@ Newest first. Dates are the tag date.
   discovered and the root `SKILL.md` is ignored, so `/bean` vanished while `bean:connect-*` stayed.
   Keeping every skill (including the primary one) under `skills/` is the durable layout — do **not**
   reintroduce a root-level `SKILL.md`.
-- **One built-in embedder → `Qwen/Qwen3-Embedding-0.6B`** — bean embeds with a single model, a
-  quantized GGUF run in-process via `llama-cpp-python` (fully local, no API). The `backend`/`model`
-  config switch and the `model2vec`/`fastembed` embedding backends are **removed** — there is no
-  fallback, so a load failure surfaces loudly. To use any other model, point `embedding.plugin` at
-  your own `.py` embedder (static config, not an env var). Existing indexes need a
-  `bean sync --rebuild` to re-embed onto the new vectors.
+- **One built-in embedder → `jinaai/jina-embeddings-v5-text-nano`** — bean embeds with a single
+  task-aware retrieval model, run in-process via `sentence-transformers` (fully local, no API;
+  queries and documents get different prompts). The `backend`/`model` config switch and the
+  `model2vec`/`fastembed`/GGUF embedding backends are **removed** — there is no fallback, so a load
+  failure surfaces loudly. To use any other model, point `embedding.plugin` at your own `.py`
+  embedder (static config, not an env var). Existing indexes need a `bean sync --rebuild` to re-embed
+  onto the new vectors.
 - **Connectors + retrieval batch** — the 11 built-in connectors moved to `bean/connectors/` and
   Notion was removed (**10 core** now); Google Drive indexes each comment as its own
   author-attributed, timestamped document (`gdocs.comments`); the embedder is a single built-in model
-  (`Qwen/Qwen3-Embedding-0.6B`) with an `embedding.plugin` code hook to swap in any other; new
+  (`jinaai/jina-embeddings-v5-text-nano`) with an `embedding.plugin` code hook to swap in any other; new
   `bean sql` runs read-only SELECT/WITH over the DuckDB store (no query
   prints the schema, `--global` for the shared store); sync checkpoints the embed phase per-document
   so an interrupted run resumes cleanly; local files gained `.pptx`/`.xlsx`/`.html`; each connector

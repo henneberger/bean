@@ -19,15 +19,15 @@ from .workspace import bean_home
 
 DEFAULTS: dict = {
     "embedding": {
-        # How to turn text into vectors. The one built-in embedder is Qwen/Qwen3-Embedding-0.6B, run
-        # in-process as a quantized GGUF via llama-cpp-python — fully local, CPU-friendly, no API.
-        # There is no backend/model switch and no fallback: if it can't load, bean fails loudly.
+        # How to turn text into vectors. The one built-in embedder is jinaai/jina-embeddings-v5-
+        # text-nano, run in-process via sentence-transformers — fully local, no API. There is no
+        # backend/model switch and no fallback: if it can't load, bean fails loudly.
         # Changing embedders needs a `bean sync --rebuild`; `bean status` warns when the index was
         # built with a different one.
         "batch_size": 64,
         # To use any other model, point `plugin` at your own code: a .py path (or import path)
         # exposing `embed(texts) -> list[list[float]]` (+ optional `embed_query(text)`). A static
-        # config value, never an environment variable. null = the built-in Qwen3 embedder.
+        # config value, never an environment variable. null = the built-in jina embedder.
         "plugin": None,
     },
     # Global chunking defaults. Any source may override the whole block (or any leaf) with a

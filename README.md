@@ -136,7 +136,7 @@ configured.
 
 | Path | Default | What it does |
 |------|---------|--------------|
-| `embedding.plugin` | `null` | `null` uses the one built-in embedder (`Qwen/Qwen3-Embedding-0.6B`); set it to a path/import path of a `.py` exposing `embed(texts)` (and optional `embed_query`) to use any other model — any library/API that returns vectors (⟳ sync --rebuild) |
+| `embedding.plugin` | `null` | `null` uses the one built-in embedder (`jinaai/jina-embeddings-v5-text-nano`); set it to a path/import path of a `.py` exposing `embed(texts)` (and optional `embed_query`) to use any other model — any library/API that returns vectors (⟳ sync --rebuild) |
 | `embedding.batch_size` | `64` | embed batch size |
 | `chunking.lines` / `overlap` | `40` / `8` | window height and shared lines (⟳) |
 | `chunking.max_chars` / `min_chars` | `2000` / `40` | per-chunk cap; drop windows shorter than this (⟳) |
@@ -169,8 +169,9 @@ since chat is short.
 never re-scan a window on every sync. `sync --rebuild` ignores the cursor to re-pull within `--since`.
 
 **One built-in embedder, and a plugin hook for anything else.** bean embeds with
-`Qwen/Qwen3-Embedding-0.6B`, run in-process as a quantized GGUF via llama-cpp-python — fully local,
-CPU-friendly, no API. There's no backend/model switch and no silent fallback: if the model can't
+`jinaai/jina-embeddings-v5-text-nano`, run in-process via sentence-transformers — fully local, no
+API. It's a task-aware retrieval model, so queries and documents are encoded with different prompts.
+There's no backend/model switch and no silent fallback: if the model can't
 load, bean fails loudly rather than degrading to something worse. To use a different model, point
 `embedding.plugin` at a `.py` (a path or import path) exposing `embed(texts) -> list[list[float]]`
 (and optionally `embed_query(text)`) — any library or API that returns vectors. It's a static config
@@ -192,8 +193,8 @@ it's slow: Unlimited-OCR is high quality but ~40s/page on CPU.
 ## Indexing speed
 
 Everything runs locally on CPU, so the first sync of a big backlog takes real time. Rough numbers on
-a 2024 laptop (Apple M3 Pro, no GPU). The built-in embedder is a 0.6B-parameter transformer
-(`Qwen/Qwen3-Embedding-0.6B`), so every chunk is a full forward pass — text is the throughput floor,
+a 2024 laptop (Apple M3 Pro, no GPU). The built-in embedder is a compact transformer
+(`jinaai/jina-embeddings-v5-text-nano`), so every chunk is a full forward pass — text is the throughput floor,
 and a large first sync is an hours-not-minutes job:
 
 | Work | Throughput | So a first sync of… |
@@ -205,7 +206,7 @@ and a large first sync is an hours-not-minutes job:
 **Scanned PDFs are the slow path.** With OCR on, plan on ~40 seconds per page and **leave the laptop
 running overnight**. A few hundred pages is an evening. A few thousand is a couple of nights. Sync is
 resumable, so an interrupted run picks up where it left off. (One-time downloads on first use,
-excluded above: the built-in `Qwen/Qwen3-Embedding-0.6B` GGUF ~640 MB, and the OCR model ~6 GB the
+excluded above: the built-in `jinaai/jina-embeddings-v5-text-nano` weights ~480 MB, and the OCR model ~6 GB the
 first time you enable it.)
 
 ## How it works

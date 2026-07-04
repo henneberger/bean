@@ -1,8 +1,10 @@
 """Embeddings — one built-in model, plus a code-plugin hook. Resolved from `settings["embedding"]`:
 
-  - the BUILT-IN (default): Qwen/Qwen3-Embedding-0.6B, run in-process as a quantized GGUF via
-    llama-cpp-python. Fully local, CPU-friendly, no API. There is no backend/model selection and no
-    fallback — if the model can't load, bean fails loudly rather than silently degrading.
+  - the BUILT-IN (default): jinaai/jina-embeddings-v5-text-nano, run in-process via
+    sentence-transformers. It's a task-aware retrieval model, so queries and documents are encoded
+    with different prompts (query vs document) — matching what it was trained for. There is no
+    backend/model selection and no fallback: if it can't load, bean fails loudly rather than silently
+    degrading.
   - a PLUGIN: set `embedding.plugin` to a .py path (or import path) exposing
     `embed(texts) -> list[list[float]]` and optionally `embed_query(text) -> list[float]`. This is
     how you swap in any other model — a static config value, never an environment variable. Most
@@ -19,13 +21,7 @@ import importlib.util
 from pathlib import Path
 
 # The single built-in embedder. Other models go through `embedding.plugin`, not a config switch.
-MODEL_ID = "Qwen/Qwen3-Embedding-0.6B"
-_GGUF_REPO = "Qwen/Qwen3-Embedding-0.6B-GGUF"
-_GGUF_FILE = "Qwen3-Embedding-0.6B-Q8_0.gguf"
-# Qwen3-Embedding is instruction-tuned on the query side: queries get a task instruction, documents
-# are embedded raw. Matching that asymmetry is what the model was trained for.
-_QUERY_INSTRUCT = ("Instruct: Given a search query, retrieve relevant passages that answer it\n"
-                   "Query: ")
+MODEL_ID = "jinaai/jina-embeddings-v5-text-nano"
 
 _cache: dict = {}
 
@@ -57,13 +53,13 @@ def _resolve(emb: dict):
             _cache[key] = _Plugin(plugin)
         else:
             _reject_legacy(emb)
-            _cache[key] = _Qwen3()
+            _cache[key] = _Jina()
     return _cache[key]
 
 
 def _reject_legacy(emb: dict) -> None:
-    """Fail loudly on stale `backend`/`model` config instead of silently ignoring it. The built-in
-    is Qwen3-only now; anything else goes through `embedding.plugin`."""
+    """Fail loudly on stale `backend`/`model` config instead of silently ignoring it. There is one
+    built-in model now; anything else goes through `embedding.plugin`."""
     stale = [k for k in ("backend", "model") if emb.get(k)]
     if stale:
         raise RuntimeError(
@@ -72,21 +68,28 @@ def _reject_legacy(emb: dict) -> None:
             "embedder module (see bean/embed.py). Then run `bean sync --rebuild`.")
 
 
-class _Qwen3:
-    """Qwen3-Embedding-0.6B as a quantized GGUF, run in-process via llama-cpp-python."""
+class _Jina:
+    """jina-embeddings-v5-text-nano via sentence-transformers. Task-aware: documents and queries are
+    encoded with the model's `retrieval` document/query prompts respectively."""
     def __init__(self):
         try:
-            from llama_cpp import Llama
+            from sentence_transformers import SentenceTransformer
         except ImportError as err:
-            raise RuntimeError("the built-in embedder needs `pip install llama-cpp-python`") from err
-        self.model = Llama.from_pretrained(
-            repo_id=_GGUF_REPO, filename=_GGUF_FILE, embedding=True, n_ctx=2048, verbose=False)
+            raise RuntimeError(
+                "the built-in embedder needs `pip install sentence-transformers`") from err
+        # CPU-friendly defaults: no flash-attention / bf16 (those are the model card's GPU tips).
+        self.model = SentenceTransformer(MODEL_ID, trust_remote_code=True)
+
+    def _encode(self, texts, prompt_name, batch):
+        vecs = self.model.encode(sentences=list(texts), task="retrieval", prompt_name=prompt_name,
+                                 batch_size=batch, convert_to_numpy=True, normalize_embeddings=True)
+        return [list(map(float, v)) for v in vecs]
 
     def embed(self, texts, batch):
-        return [list(map(float, v)) for v in self.model.embed(list(texts))]
+        return self._encode(texts, "document", batch)
 
     def query(self, text):
-        return self.embed([_QUERY_INSTRUCT + text], 1)[0]
+        return self._encode([text], "query", 1)[0]
 
 
 class _Plugin:
