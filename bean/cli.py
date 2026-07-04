@@ -473,11 +473,11 @@ def cmd_sql(ws: Workspace, args) -> int:
         print("bean sql runs read-only queries only (SELECT / WITH).", file=sys.stderr)
         return 2
     target = Workspace.global_() if args.global_ else ws
-    if not target.db_path.exists():
+    if not target.catalog_dir.exists():
         print("Nothing indexed yet — run `bean sync`.", file=sys.stderr)
         return 1
-    import duckdb
-    con = duckdb.connect(str(target.db_path), read_only=True)
+    from .lancecat import Catalog
+    con = Catalog(target.catalog_dir).duck()
     try:
         from .index import chunks_dataset
         ds = chunks_dataset(target)

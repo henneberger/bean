@@ -1,11 +1,12 @@
-"""DuckDB catalog for a workspace: document snapshots, revision history, sync cursors, and the
-relationship-edge graph.
+"""Store: the document/revision/edge catalog for a workspace, backed by Lance (via `Catalog`)
+for the shared relational data and a small private DuckDB for sync cursors (`state`).
 
 Documents are the unit of sync — one row per Google Doc, one per Slack thread or message. The
 body lives here; the content hash is the change authority (a revision bump whose text is identical
 updates metadata but re-embeds nothing). Chunks live once in Lance (text + vectors); the keyword /
-neighbour / merge queries here run as DuckDB SQL directly over that Lance dataset (register it on the
-connection, then query) — so DuckDB stays the relational engine without a duplicated chunk mirror.
+neighbour / merge queries here run as DuckDB SQL directly over that Lance dataset via `Catalog.duck()`
+— so DuckDB stays the query engine without a duplicated chunk mirror. Writes to documents/revisions/
+edges go through `Catalog`'s Lance ops (a DuckDB-registered Lance dataset is a read-only view).
 """
 
 from __future__ import annotations
@@ -13,41 +14,32 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import dataclass
+from datetime import datetime, timezone
 
 import duckdb
 
-SCHEMA = """
-CREATE TABLE IF NOT EXISTS documents (
-  source TEXT NOT NULL, doc_id TEXT NOT NULL, title TEXT, url TEXT,
-  revision_id TEXT, hash TEXT NOT NULL, body TEXT NOT NULL,
-  -- Source-native metadata (nullable; each connector fills what it has). created_at/modified_at
-  -- are the document's OWN timestamps at the source, distinct from fetched_at (when bean synced).
-  created_at TIMESTAMP, modified_at TIMESTAMP, author TEXT, mime TEXT,
-  fetched_at TIMESTAMP DEFAULT now(),
-  PRIMARY KEY (source, doc_id)
-);
-CREATE TABLE IF NOT EXISTS revisions (
-  source TEXT NOT NULL, doc_id TEXT NOT NULL, revision_id TEXT,
-  hash TEXT NOT NULL, fetched_at TIMESTAMP DEFAULT now()
-);
--- No chunk table here: chunks live once in Lance. The keyword / neighbour / merge queries below run
--- as DuckDB SQL directly over the Lance dataset (register + query), so there is a single copy of the
--- chunk data and DuckDB stays the relational engine. Chunk `ord` is derived on the fly from line
--- order (large coarse chunks, id '…-large', are excluded), so no rebuild is needed to adopt this.
-CREATE TABLE IF NOT EXISTS state (key TEXT PRIMARY KEY, value TEXT);
--- Lightweight relationship index: edges derived at sync time from source-native metadata
--- (authored_by → a person, in-container → a repo/project/channel, links-to → another doc). No LLM;
--- powers `bean related` and graph-expansion. dst_kind ∈ {doc, container, person, link}.
-CREATE TABLE IF NOT EXISTS edges (
-  source TEXT NOT NULL, src_doc TEXT NOT NULL, rel TEXT NOT NULL,
-  dst_kind TEXT NOT NULL, dst TEXT NOT NULL,
-  PRIMARY KEY (source, src_doc, rel, dst_kind, dst)
-);
-"""
+from .lancecat import Catalog
+
+STATE_SCHEMA = "CREATE TABLE IF NOT EXISTS state (key TEXT PRIMARY KEY, value TEXT)"
+
+_DOC_COLS = ("source", "doc_id", "title", "url", "revision_id", "hash", "body",
+             "created_at", "modified_at", "author", "mime", "fetched_at")
 
 
 def content_hash(text: str) -> str:
     return hashlib.sha1(text.encode()).hexdigest()[:16]
+
+
+def _now() -> datetime:
+    return datetime.now(timezone.utc).replace(tzinfo=None)
+
+
+def _to_ts(v):
+    """Parse a source-native ISO8601 timestamp (as connectors hand it in `meta`) to a naive
+    datetime for the Lance `documents` schema; already-parsed values pass through unchanged."""
+    if v is None or isinstance(v, datetime):
+        return v
+    return datetime.fromisoformat(str(v).replace("Z", "+00:00")).replace(tzinfo=None)
 
 
 @dataclass
@@ -68,18 +60,14 @@ class Doc:
 class Store:
     def __init__(self, ws):
         self.ws = ws  # needed to reach the Lance chunk dataset for the keyword/neighbour queries
-        self.con = duckdb.connect(str(ws.db_path))
-        self.con.execute(SCHEMA)
-        # Migrate DBs created before the metadata columns existed (CREATE IF NOT EXISTS won't add them).
-        # `embedded_hash` is the sync checkpoint: it holds the content hash whose chunks are actually
-        # in Lance, so a doc still needs embedding whenever embedded_hash != hash (or is NULL) — which
-        # survives an interrupted sync and lets it resume without re-embedding what's already done.
-        for col, typ in (("created_at", "TIMESTAMP"), ("modified_at", "TIMESTAMP"),
-                         ("author", "TEXT"), ("mime", "TEXT"), ("embedded_hash", "TEXT")):
-            self.con.execute(f"ALTER TABLE documents ADD COLUMN IF NOT EXISTS {col} {typ}")
+        self.cat = Catalog(ws.catalog_dir)
+        # `state` (sync cursors etc.) is the only thing that stays in a private local DuckDB;
+        # documents/revisions/edges now live on the Catalog's Lance datasets.
+        self._state = duckdb.connect(str(ws.db_path))
+        self._state.execute(STATE_SCHEMA)
 
     def close(self):
-        self.con.close()
+        self._state.close()
 
     def __enter__(self):
         return self
@@ -89,11 +77,15 @@ class Store:
 
     # -- documents -------------------------------------------------------------------------------
     def get(self, source: str, doc_id: str) -> Doc | None:
-        row = self.con.execute(
-            "SELECT source, doc_id, title, url, revision_id, hash, body, "
-            "created_at, modified_at, author, mime FROM documents WHERE source=? AND doc_id=?",
-            [source, doc_id],
-        ).fetchone()
+        con = self.cat.duck()
+        try:
+            row = con.execute(
+                "SELECT source, doc_id, title, url, revision_id, hash, body, "
+                "created_at, modified_at, author, mime FROM documents WHERE source=? AND doc_id=?",
+                [source, doc_id],
+            ).fetchone()
+        finally:
+            con.close()
         return Doc(*row) if row else None
 
     def upsert(self, source: str, doc_id: str, *, title: str, url: str | None,
@@ -102,41 +94,42 @@ class Store:
         `meta` carries source-native fields: created_at, modified_at, author, mime (all optional)."""
         h = content_hash(body)
         m = meta or {}
-        md = [m.get("created_at"), m.get("modified_at"), m.get("author"), m.get("mime")]
-        existing = self.get(source, doc_id)
-        if existing and existing.hash == h:
-            self.con.execute(
-                "UPDATE documents SET title=?, url=?, revision_id=?, "
-                "created_at=?, modified_at=?, author=?, mime=?, fetched_at=now() "
-                "WHERE source=? AND doc_id=?",
-                [title, url, revision_id, *md, source, doc_id],
-            )
+        created_at, modified_at = _to_ts(m.get("created_at")), _to_ts(m.get("modified_at"))
+        author, mime = m.get("author"), m.get("mime")
+        now = _now()
+        con = self.cat.duck()
+        try:
+            existing = con.execute(
+                "SELECT hash, embedded_hash FROM documents WHERE source=? AND doc_id=?",
+                [source, doc_id]).fetchone()
+        finally:
+            con.close()
+        row = {"source": source, "doc_id": doc_id, "title": title, "url": url,
+               "revision_id": revision_id, "hash": h, "body": body,
+               "created_at": created_at, "modified_at": modified_at, "author": author,
+               "mime": mime, "fetched_at": now}
+        if existing and existing[0] == h:
+            row["embedded_hash"] = existing[1]  # metadata-only change: keep the embed checkpoint
+            self.cat.upsert_documents([row])
             return False
-        self.con.execute(
-            """INSERT INTO documents (source, doc_id, title, url, revision_id, hash, body,
-                                      created_at, modified_at, author, mime)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-               ON CONFLICT (source, doc_id) DO UPDATE SET
-                 title=excluded.title, url=excluded.url, revision_id=excluded.revision_id,
-                 hash=excluded.hash, body=excluded.body, created_at=excluded.created_at,
-                 modified_at=excluded.modified_at, author=excluded.author, mime=excluded.mime,
-                 fetched_at=now()""",
-            [source, doc_id, title, url, revision_id, h, body, *md],
-        )
-        self.con.execute(
-            "INSERT INTO revisions (source, doc_id, revision_id, hash) VALUES (?, ?, ?, ?)",
-            [source, doc_id, revision_id, h],
-        )
+        row["embedded_hash"] = None  # content changed: needs re-embedding
+        self.cat.upsert_documents([row])
+        self.cat.append_revisions([{"source": source, "doc_id": doc_id,
+                                    "revision_id": revision_id, "hash": h, "fetched_at": now}])
         return True
 
     def delete(self, source: str, doc_id: str) -> None:
-        self.con.execute("DELETE FROM documents WHERE source=? AND doc_id=?", [source, doc_id])
-        self.con.execute("DELETE FROM edges WHERE source=? AND src_doc=?", [source, doc_id])
+        self.cat.delete_documents(source, [doc_id])
+        self.cat.replace_edges(source, doc_id, [])
         # Chunk vectors live in Lance; index.delete_doc removes them (called by the sync/scope paths).
 
     def doc_ids(self, source: str) -> list[str]:
-        return [r[0] for r in self.con.execute(
-            "SELECT doc_id FROM documents WHERE source=? ORDER BY doc_id", [source]).fetchall()]
+        con = self.cat.duck()
+        try:
+            return [r[0] for r in con.execute(
+                "SELECT doc_id FROM documents WHERE source=? ORDER BY doc_id", [source]).fetchall()]
+        finally:
+            con.close()
 
     # -- embed checkpoint (sync resumability) ----------------------------------------------------
     def embed_queue(self, sources=None, *, force: bool = False) -> list[tuple[str, str]]:
@@ -152,24 +145,48 @@ class Store:
             params += list(sources)
         if not force:
             where.append("(embedded_hash IS NULL OR embedded_hash <> hash)")
-        return [(r[0], r[1]) for r in self.con.execute(
-            f"SELECT source, doc_id FROM documents WHERE {' AND '.join(where)} "
-            "ORDER BY COALESCE(modified_at, fetched_at) ASC, doc_id ASC", params).fetchall()]
+        con = self.cat.duck()
+        try:
+            return [(r[0], r[1]) for r in con.execute(
+                f"SELECT source, doc_id FROM documents WHERE {' AND '.join(where)} "
+                "ORDER BY COALESCE(modified_at, fetched_at) ASC, doc_id ASC", params).fetchall()]
+        finally:
+            con.close()
 
     def mark_embedded(self, source: str, doc_id: str) -> None:
-        """Checkpoint one doc: its current content is now embedded in Lance. Autocommitted, so an
-        interrupted sync resumes from exactly here."""
-        self.con.execute(
-            "UPDATE documents SET embedded_hash = hash WHERE source=? AND doc_id=?", [source, doc_id])
+        """Checkpoint one doc: its current content is now embedded in Lance. Reads the doc row back
+        and rewrites embedded_hash=hash through the Catalog (a Lance-registered view is read-only,
+        so this can't be a DuckDB UPDATE) — durable immediately, so an interrupted sync resumes
+        from exactly here."""
+        con = self.cat.duck()
+        try:
+            row = con.execute(
+                f"SELECT {', '.join(_DOC_COLS)} FROM documents WHERE source=? AND doc_id=?",
+                [source, doc_id]).fetchone()
+        finally:
+            con.close()
+        if row is None:
+            return
+        d = dict(zip(_DOC_COLS, row))
+        d["embedded_hash"] = d["hash"]
+        self.cat.upsert_documents([d])
 
     def counts(self) -> dict[str, int]:
-        return dict(self.con.execute(
-            "SELECT source, count(*) FROM documents GROUP BY source").fetchall())
+        con = self.cat.duck()
+        try:
+            return dict(con.execute(
+                "SELECT source, count(*) FROM documents GROUP BY source").fetchall())
+        finally:
+            con.close()
 
     def _rows(self, sql: str, params: list) -> list[dict]:
-        cur = self.con.execute(sql, params)
-        cols = [d[0] for d in cur.description]
-        return [dict(zip(cols, row)) for row in cur.fetchall()]
+        con = self.cat.duck()
+        try:
+            cur = con.execute(sql, params)
+            cols = [d[0] for d in cur.description]
+            return [dict(zip(cols, row)) for row in cur.fetchall()]
+        finally:
+            con.close()
 
     # -- chunk queries: DuckDB SQL run directly over the single Lance chunk dataset ----------------
     # `ord` (a chunk's position within its document) is derived from line order; the coarse
@@ -184,11 +201,14 @@ class Store:
         ds = chunks_dataset(self.ws)
         if ds is None:
             return []
-        self.con.register("_chunks", ds)
+        con = self.cat.duck()
         try:
-            return self._rows(f"WITH base AS ({self._BASE}) {select_sql}", params)
+            con.register("_chunks", ds)
+            cur = con.execute(f"WITH base AS ({self._BASE}) {select_sql}", params)
+            cols = [d[0] for d in cur.description]
+            return [dict(zip(cols, row)) for row in cur.fetchall()]
         finally:
-            self.con.unregister("_chunks")
+            con.close()
 
     def keyword_search(self, query: str, *, k: int = 200, source: str | None = None,
                        doc_like: str | None = None) -> list[dict]:
@@ -266,28 +286,31 @@ class Store:
         for s, d in dict.fromkeys(pairs):
             by_src.setdefault(s, []).append(d)
         out: dict = {}
-        for s, ids in by_src.items():
-            ph = ",".join("?" * len(ids))
-            for did, author, mod in self.con.execute(
-                    f"SELECT doc_id, author, modified_at FROM documents "
-                    f"WHERE source=? AND doc_id IN ({ph})", [s, *ids]).fetchall():
-                out[(s, did)] = {"author": author, "modified_at": mod}
+        con = self.cat.duck()
+        try:
+            for s, ids in by_src.items():
+                ph = ",".join("?" * len(ids))
+                for did, author, mod in con.execute(
+                        f"SELECT doc_id, author, modified_at FROM documents "
+                        f"WHERE source=? AND doc_id IN ({ph})", [s, *ids]).fetchall():
+                    out[(s, did)] = {"author": author, "modified_at": mod}
+        finally:
+            con.close()
         return out
 
     def revisions(self, source: str, doc_id: str) -> list[tuple]:
-        return self.con.execute(
-            "SELECT revision_id, hash, fetched_at FROM revisions WHERE source=? AND doc_id=? ORDER BY fetched_at",
-            [source, doc_id],
-        ).fetchall()
+        con = self.cat.duck()
+        try:
+            return con.execute(
+                "SELECT revision_id, hash, fetched_at FROM revisions WHERE source=? AND doc_id=? ORDER BY fetched_at",
+                [source, doc_id],
+            ).fetchall()
+        finally:
+            con.close()
 
     # -- edges (lightweight relationship graph) --------------------------------------------------
     def replace_edges(self, source: str, src_doc: str, rows: list[dict]) -> None:
-        self.con.execute("DELETE FROM edges WHERE source=? AND src_doc=?", [source, src_doc])
-        for r in rows:
-            self.con.execute(
-                "INSERT INTO edges (source, src_doc, rel, dst_kind, dst) VALUES (?, ?, ?, ?, ?) "
-                "ON CONFLICT DO NOTHING",
-                [source, src_doc, r["rel"], r["dst_kind"], str(r["dst"])])
+        self.cat.replace_edges(source, src_doc, rows)
 
     def edges_of(self, source: str, doc_id: str) -> list[dict]:
         return self._rows("SELECT rel, dst_kind, dst FROM edges WHERE source=? AND src_doc=?",
@@ -331,13 +354,13 @@ class Store:
         out.sort(key=lambda r: (r.get("modified_at") is None, r.get("modified_at")), reverse=True)
         return out[:limit]
 
-    # -- state (sync cursors etc.; values are JSON) ----------------------------------------------
+    # -- state (sync cursors etc.; values are JSON; small private local DuckDB) -------------------
     def get_state(self, key: str, default=None):
-        row = self.con.execute("SELECT value FROM state WHERE key=?", [key]).fetchone()
+        row = self._state.execute("SELECT value FROM state WHERE key=?", [key]).fetchone()
         return json.loads(row[0]) if row else default
 
     def set_state(self, key: str, value) -> None:
-        self.con.execute(
+        self._state.execute(
             "INSERT INTO state (key, value) VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET value=excluded.value",
             [key, json.dumps(value)],
         )

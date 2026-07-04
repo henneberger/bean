@@ -70,11 +70,21 @@ class Workspace:
 
     @property
     def db_path(self) -> Path:
+        """The small private DuckDB holding only sync cursors (`state`); documents/revisions/edges
+        live on the Lance `Catalog` (see `catalog_dir`)."""
         return self.dir / "bean.duckdb"
 
     @property
+    def catalog_dir(self) -> Path:
+        """Root of the Lance `Catalog`: the four shared datasets (documents/revisions/edges/chunks)
+        as Lance tables under one lancedb dir."""
+        return self.dir / "catalog"
+
+    @property
     def lance_dir(self) -> Path:
-        return self.dir / "lance"
+        # Chunks live in the same lancedb dir as the rest of the Catalog — one `Catalog` owns all
+        # four datasets.
+        return self.catalog_dir
 
     @property
     def config_path(self) -> Path:
