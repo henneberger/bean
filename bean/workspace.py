@@ -90,6 +90,35 @@ class Workspace:
     def config_path(self) -> Path:
         return self.dir / "config.json"
 
+    # -- cloud (S3-backed catalog) awareness -----------------------------------------------------
+    @property
+    def cloud(self) -> dict:
+        """The resolved `cloud` block for this workspace (DEFAULTS <- global <- this workspace's
+        `settings.cloud`). Lazy import: `config` imports `bean_home` from this module."""
+        from . import config
+        return config.resolve(self).get("cloud") or {}
+
+    @property
+    def is_cloud(self) -> bool:
+        return bool(self.cloud.get("enabled"))
+
+    @property
+    def remote_uri(self) -> str | None:
+        """`s3://bucket/prefix` for this workspace's catalog, or None when not cloud-enabled or no
+        bucket is configured."""
+        if not self.is_cloud:
+            return None
+        bucket = self.cloud.get("bucket") or ""
+        if not bucket:
+            return None
+        prefix = (self.cloud.get("prefix") or "").rstrip("/")
+        return f"s3://{bucket}/{prefix}" if prefix else f"s3://{bucket}"
+
+    @property
+    def replica_dir(self) -> Path:
+        """The local mirror of the (possibly cloud) catalog — same path as `catalog_dir`."""
+        return self.catalog_dir
+
     # -- config: which sources this repo tracks -------------------------------------------------
     def load_config(self) -> dict:
         try:

@@ -1222,5 +1222,23 @@ with Store(_mig3) as s:
     ok(any(e["dst"] == "other-doc" for e in s.edges_of("gdocs", "pz")),
        "migration copies edges even when Lance documents is already populated (no data loss)")
 
+# cloud config + Workspace cloud awareness (Task 2.1) -------------------------------------------
+cloudws = Workspace(repo("cloud-off"))
+ok(cloudws.is_cloud is False, "no cloud config -> is_cloud False")
+ok(cloudws.remote_uri is None, "no cloud config -> remote_uri None")
+ok(cloudws.replica_dir == cloudws.catalog_dir, "replica_dir mirrors catalog_dir")
+
+cloudws2 = Workspace(repo("cloud-on"))
+cloudws2.save_config({"settings": {"cloud": {
+    "enabled": True, "bucket": "b", "prefix": "p/x", "region": "us-east-1",
+}}})
+ok(cloudws2.is_cloud is True, "cloud.enabled True -> is_cloud True")
+ok(cloudws2.remote_uri == "s3://b/p/x", "remote_uri built from bucket + prefix")
+ok(cloudws2.cloud["region"] == "us-east-1", "cloud property exposes resolved region")
+
+cloudws3 = Workspace(repo("cloud-noprefix"))
+cloudws3.save_config({"settings": {"cloud": {"enabled": True, "bucket": "b", "prefix": ""}}})
+ok(cloudws3.remote_uri == "s3://b", "empty prefix -> bare bucket uri")
+
 print(f"bean: {CHECKS - FAILED}/{CHECKS} checks passed" if FAILED == 0 else f"bean: {FAILED}/{CHECKS} checks FAILED")
 sys.exit(0 if FAILED == 0 else 1)

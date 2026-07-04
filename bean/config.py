@@ -111,6 +111,16 @@ DEFAULTS: dict = {
     "discord": {
         "lookback_days": 14,  # same initial backfill as Slack (first sync only, then the cursor)
     },
+    "cloud": {
+        # Whether the Lance catalog lives on S3 (with a full local replica) instead of purely
+        # locally. false = the local-only behaviour from Phase 1; nothing else in this block
+        # matters when disabled.
+        "enabled": False,
+        "role": "writer",   # "writer" | "consumer" — who may push commits to the shared bucket
+        "bucket": "",
+        "prefix": "",
+        "region": "",
+    },
     "gdocs": {
         # With no doc/folder explicitly added, bean auto-indexes the Google Docs + PDFs you own.
         # The first sync reaches back this many days; later syncs discover only files changed since
