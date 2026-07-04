@@ -1147,5 +1147,20 @@ with _ctx.redirect_stdout(_io.StringIO()):
     ok(cmd_sql(_sqlws, _sql("WITH", "x", "AS", "(SELECT", "1", "AS", "n)", "SELECT", "*", "FROM", "x")) == 0,
        "cmd_sql allows a WITH … SELECT CTE")
 
+# == Lance catalog: relational tables on Lance, queried via DuckDB =============================
+from bean.lancecat import Catalog  # noqa: E402
+_catdir = Path(tempfile.mkdtemp(prefix="bean-cat-"))
+_cat = Catalog(_catdir)
+_cat.upsert_documents([{"source": "gdocs", "doc_id": "d1", "title": "T", "url": "u", "revision_id": "r1",
+                        "hash": "h1", "body": "alpha body", "created_at": None, "modified_at": None,
+                        "author": "Ada", "mime": None, "fetched_at": None}])
+_cat.upsert_documents([{"source": "gdocs", "doc_id": "d1", "title": "T2", "url": "u", "revision_id": "r2",
+                        "hash": "h2", "body": "beta body", "created_at": None, "modified_at": None,
+                        "author": "Ada", "mime": None, "fetched_at": None}])
+_rows = _cat.duck().execute("SELECT title, hash, body FROM documents WHERE doc_id='d1'").fetchall()
+ok(_rows == [("T2", "h2", "beta body")], "Lance upsert updates in place, queried via DuckDB")
+_cat.delete_documents("gdocs", ["d1"])
+ok(_cat.duck().execute("SELECT count(*) FROM documents").fetchone()[0] == 0, "Lance delete removes the row")
+
 print(f"bean: {CHECKS - FAILED}/{CHECKS} checks passed" if FAILED == 0 else f"bean: {FAILED}/{CHECKS} checks FAILED")
 sys.exit(0 if FAILED == 0 else 1)
