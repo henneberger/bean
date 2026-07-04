@@ -33,6 +33,28 @@ jobs:
       - name: Check (version sync + byte-compile + offline tests)
         run: python dev/release.py check
 
+  plugin-eval:
+    name: plugin eval (deepseek)
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      - name: Install bean
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e .
+      # Drives skills/bean/SKILL.md with DeepSeek over an offline fixture (the fixture uses a
+      # deterministic embedding plugin, so no model download). Skips cleanly if the secret is unset.
+      - name: Run plugin eval
+        env:
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+        run: python dev/eval/run_eval.py
+
   build:
     name: build wheel + sdist
     needs: test
