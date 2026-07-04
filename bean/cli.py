@@ -10,6 +10,7 @@ from a terminal; the plugin calls these subcommands to retrieve context).
   bean doc <ref> [--source S]                 Full document body
   bean neighbors <chunk-id> [--radius N]
   bean config [get PATH | set PATH VALUE | list]
+  bean cloud init --bucket NAME [--prefix P] [--region R]   Become a cloud writer (push local index to S3)
   bean sql "SELECT …"             Read-only SQL over the store (no query = print the schema)
   bean status
 
@@ -438,6 +439,23 @@ def cmd_config(ws: Workspace, args) -> int:
     return 2
 
 
+# -- cloud ----------------------------------------------------------------------------------------
+def cmd_cloud(ws: Workspace, args) -> int:
+    """Turn this workspace's Lance catalog into a cloud-backed one. `init` writes the workspace as
+    the writer of a new (or empty) bucket and pushes whatever's already indexed locally up to it;
+    `connect` (Task 3.2) will instead join an existing bucket as a read-only consumer."""
+    from . import remote
+    if args.action == "init":
+        if not args.bucket:
+            print("Usage: bean cloud init --bucket NAME [--prefix P] [--region R]", file=sys.stderr)
+            return 2
+        remote.cloud_init(ws, args.bucket, args.prefix or "", args.region or "")
+        print(f"✓ cloud writer initialised: bucket={args.bucket} prefix={args.prefix or ''} role=writer")
+        return 0
+    print(f"Unknown cloud action {args.action!r}. Known actions: init", file=sys.stderr)
+    return 2
+
+
 # -- sql ----------------------------------------------------------------------------------------
 _SQL_SCHEMA = """bean stores documents/revisions/edges/chunks in a Lance catalog + a private state table. Query READ-ONLY:
   bean sql "SELECT ..."        (only SELECT / WITH)      add --global for the shared cross-repo store
@@ -621,6 +639,13 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("path", nargs="?")
     p.add_argument("value", nargs="?")
     p.set_defaults(fn=cmd_config)
+
+    p = sub.add_parser("cloud", help="make this workspace's catalog cloud-backed (S3)")
+    p.add_argument("action", choices=["init", "connect"])
+    p.add_argument("--bucket", help="S3 bucket name")
+    p.add_argument("--prefix", help="key prefix under the bucket (default: none/root)")
+    p.add_argument("--region", help="AWS region")
+    p.set_defaults(fn=cmd_cloud)
 
     p = sub.add_parser("status", help="workspace, auth, and index state")
     p.set_defaults(fn=cmd_status)

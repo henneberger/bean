@@ -1563,5 +1563,61 @@ ok(_rsc_replica_con2.execute("SELECT count(*) FROM documents").fetchone()[0] == 
    "cloud run_sync: the replica reflects the deletion too, after the final pull (not corrupted)")
 _rsc_replica_con2.close()
 
+# -- Task 3.1: `bean cloud init` — become a cloud WRITER (write config + push local index) -------
+# A local temp dir stands in for S3, same trick as every other cloud test above: monkeypatch the
+# read-only `Workspace.remote_uri` property at the class level so the push takes the local-dir
+# branch of `remote._copy`, fully offline.
+_ci_ws = Workspace(repo("cloud-init"))
+with Store(_ci_ws) as _ci_store:
+    _ci_store.upsert("gdocs", "ci1", title="T", url=None, revision_id=None, body="cloud init body")
+
+_ci_remote_dir = Path(tempfile.mkdtemp(prefix="bean-cloud-init-remote-"))
+_orig_remote_uri_prop3 = Workspace.remote_uri
+Workspace.remote_uri = property(lambda self: str(_ci_remote_dir))
+try:
+    _remote.cloud_init(_ci_ws, "b", "p", "us-east-1")
+finally:
+    Workspace.remote_uri = _orig_remote_uri_prop3
+
+ok(_ci_ws.is_cloud is True, "cloud_init: workspace is now cloud-enabled")
+ok(_ci_ws.cloud["role"] == "writer", "cloud_init: role is writer")
+ok(_ci_ws.cloud["bucket"] == "b" and _ci_ws.cloud["prefix"] == "p" and _ci_ws.cloud["region"] == "us-east-1",
+   "cloud_init: bucket/prefix/region are saved in the workspace config")
+_ci_remote_con = Catalog(remote_uri=str(_ci_remote_dir)).duck()
+ok(_ci_remote_con.execute("SELECT count(*) FROM documents").fetchone()[0] == 1,
+   "cloud_init: the pre-existing local index was pushed up to the remote")
+ok(_ci_remote_con.execute("SELECT body FROM documents WHERE doc_id='ci1'").fetchone()[0]
+   == "cloud init body", "cloud_init: the pushed document matches the local one")
+_ci_remote_con.close()
+
+# `bean cloud init` CLI end-to-end, same fake-args pattern as the cmd_sql/cmd_scope tests above.
+from bean.cli import cmd_cloud  # noqa: E402
+
+_cc_ws = Workspace(repo("cloud-init-cli"))
+_cc_remote_dir = Path(tempfile.mkdtemp(prefix="bean-cloud-init-cli-remote-"))
+
+def _cloud_args(action, bucket=None, prefix=None, region=None):
+    return _types.SimpleNamespace(action=action, bucket=bucket, prefix=prefix, region=region)
+
+_orig_remote_uri_prop4 = Workspace.remote_uri
+Workspace.remote_uri = property(lambda self: str(_cc_remote_dir))
+try:
+    _cc_rc = cmd_cloud(_cc_ws, _cloud_args("init", bucket="cc-bucket", prefix="cc-prefix",
+                                            region="us-west-2"))
+finally:
+    Workspace.remote_uri = _orig_remote_uri_prop4
+
+ok(_cc_rc == 0, "cmd_cloud init returns 0 on success")
+ok(_cc_ws.is_cloud is True and _cc_ws.cloud["bucket"] == "cc-bucket",
+   "cmd_cloud init wrote the cloud config (bucket)")
+ok(_cc_ws.cloud["prefix"] == "cc-prefix" and _cc_ws.cloud["region"] == "us-west-2",
+   "cmd_cloud init wrote the cloud config (prefix/region)")
+
+with _ctx.redirect_stderr(_io.StringIO()):
+    ok(cmd_cloud(Workspace(repo("cloud-init-nobucket")), _cloud_args("init")) == 2,
+       "cmd_cloud init fails loudly when --bucket is missing")
+    ok(cmd_cloud(Workspace(repo("cloud-init-badaction")), _cloud_args("bogus")) == 2,
+       "cmd_cloud rejects an unknown action")
+
 print(f"bean: {CHECKS - FAILED}/{CHECKS} checks passed" if FAILED == 0 else f"bean: {FAILED}/{CHECKS} checks FAILED")
 sys.exit(0 if FAILED == 0 else 1)
