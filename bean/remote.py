@@ -35,16 +35,31 @@ def push(ws) -> None:
     _copy_up(ws.replica_dir, ws.remote_uri)
 
 
+def _write_cloud_config(ws, role: str, bucket: str, prefix: str, region: str) -> None:
+    """Write `settings.cloud` (enabled, role, bucket/prefix/region) into `ws`'s config. Shared by
+    `cloud_init` (role=writer) and `cloud_connect` (role=consumer) — the config shape is identical,
+    only the role and the follow-up sync direction (push vs. pull) differ."""
+    config = ws.load_config()
+    config.setdefault("settings", {})["cloud"] = {
+        "enabled": True, "role": role, "bucket": bucket, "prefix": prefix, "region": region,
+    }
+    ws.save_config(config)
+
+
 def cloud_init(ws, bucket: str, prefix: str, region: str) -> None:
     """Turn `ws` into a cloud writer: write the cloud config (enabled, role=writer, bucket/prefix/
     region), then push whatever is already indexed locally up to the new remote so it becomes the
     shared catalog's starting content instead of an empty bucket."""
-    config = ws.load_config()
-    config.setdefault("settings", {})["cloud"] = {
-        "enabled": True, "role": "writer", "bucket": bucket, "prefix": prefix, "region": region,
-    }
-    ws.save_config(config)
+    _write_cloud_config(ws, "writer", bucket, prefix, region)
     push(ws)
+
+
+def cloud_connect(ws, bucket: str, prefix: str, region: str) -> None:
+    """Turn `ws` into a read-only cloud consumer: write the cloud config (enabled, role=consumer,
+    bucket/prefix/region) then pull the existing remote catalog down into the local replica. No
+    source credentials needed — this only ever reads the shared Lance catalog."""
+    _write_cloud_config(ws, "consumer", bucket, prefix, region)
+    pull(ws)
 
 
 def _copy_new(remote_uri: str, local_dir: Path) -> None:

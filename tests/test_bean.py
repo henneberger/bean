@@ -1619,5 +1619,63 @@ with _ctx.redirect_stderr(_io.StringIO()):
     ok(cmd_cloud(Workspace(repo("cloud-init-badaction")), _cloud_args("bogus")) == 2,
        "cmd_cloud rejects an unknown action")
 
+# -- Task 3.2: `bean cloud connect` — become a read-only cloud CONSUMER (write config + pull) ----
+# Seed a "remote" (local temp dir standing in for S3) with an already-indexed doc, then connect a
+# fresh workspace to it as a consumer — no source credentials configured anywhere.
+_cn_remote_dir = Path(tempfile.mkdtemp(prefix="bean-cloud-connect-remote-"))
+Catalog(_cn_remote_dir).upsert_documents([{
+    "source": "gdocs", "doc_id": "cn1", "title": "T", "url": "u", "revision_id": "rev1",
+    "hash": "h1", "body": "cloud connect body", "created_at": None, "modified_at": None,
+    "author": "Ada", "mime": None, "fetched_at": None,
+}])
+
+_cn_ws = Workspace(repo("cloud-connect"))
+_orig_remote_uri_prop5 = Workspace.remote_uri
+Workspace.remote_uri = property(lambda self: str(_cn_remote_dir))
+try:
+    _remote.cloud_connect(_cn_ws, "b", "p", "us-east-1")
+finally:
+    Workspace.remote_uri = _orig_remote_uri_prop5
+
+ok(_cn_ws.is_cloud is True, "cloud_connect: workspace is now cloud-enabled")
+ok(_cn_ws.cloud["role"] == "consumer", "cloud_connect: role is consumer")
+ok(_cn_ws.cloud["bucket"] == "b" and _cn_ws.cloud["prefix"] == "p" and _cn_ws.cloud["region"] == "us-east-1",
+   "cloud_connect: bucket/prefix/region are saved in the workspace config")
+_cn_replica_con = Catalog(_cn_ws.catalog_dir).duck()
+ok(_cn_replica_con.execute("SELECT count(*) FROM documents").fetchone()[0] == 1,
+   "cloud_connect: the remote's pre-existing doc was pulled down into the local replica")
+ok(_cn_replica_con.execute("SELECT body FROM documents WHERE doc_id='cn1'").fetchone()[0]
+   == "cloud connect body", "cloud_connect: the pulled document matches the remote's")
+_cn_replica_con.close()
+
+# `bean cloud connect` CLI end-to-end, same fake-args pattern as `cloud init` above.
+_cc2_remote_dir = Path(tempfile.mkdtemp(prefix="bean-cloud-connect-cli-remote-"))
+Catalog(_cc2_remote_dir).upsert_documents([{
+    "source": "gdocs", "doc_id": "cn2", "title": "T", "url": "u", "revision_id": "rev1",
+    "hash": "h1", "body": "cli connect body", "created_at": None, "modified_at": None,
+    "author": "Ada", "mime": None, "fetched_at": None,
+}])
+_cc2_ws = Workspace(repo("cloud-connect-cli"))
+
+_orig_remote_uri_prop6 = Workspace.remote_uri
+Workspace.remote_uri = property(lambda self: str(_cc2_remote_dir))
+try:
+    _cc2_rc = cmd_cloud(_cc2_ws, _cloud_args("connect", bucket="cc2-bucket", prefix="cc2-prefix",
+                                              region="us-west-2"))
+finally:
+    Workspace.remote_uri = _orig_remote_uri_prop6
+
+ok(_cc2_rc == 0, "cmd_cloud connect returns 0 on success")
+ok(_cc2_ws.is_cloud is True and _cc2_ws.cloud["role"] == "consumer",
+   "cmd_cloud connect wrote the cloud config with role=consumer")
+ok(_cc2_ws.cloud["bucket"] == "cc2-bucket" and _cc2_ws.cloud["prefix"] == "cc2-prefix",
+   "cmd_cloud connect wrote the cloud config (bucket/prefix)")
+ok(Catalog(_cc2_ws.catalog_dir).duck().execute("SELECT count(*) FROM documents").fetchone()[0] == 1,
+   "cmd_cloud connect pulled the remote's doc down through the CLI path too")
+
+with _ctx.redirect_stderr(_io.StringIO()):
+    ok(cmd_cloud(Workspace(repo("cloud-connect-nobucket")), _cloud_args("connect")) == 2,
+       "cmd_cloud connect fails loudly when --bucket is missing")
+
 print(f"bean: {CHECKS - FAILED}/{CHECKS} checks passed" if FAILED == 0 else f"bean: {FAILED}/{CHECKS} checks FAILED")
 sys.exit(0 if FAILED == 0 else 1)

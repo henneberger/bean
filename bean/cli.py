@@ -443,7 +443,8 @@ def cmd_config(ws: Workspace, args) -> int:
 def cmd_cloud(ws: Workspace, args) -> int:
     """Turn this workspace's Lance catalog into a cloud-backed one. `init` writes the workspace as
     the writer of a new (or empty) bucket and pushes whatever's already indexed locally up to it;
-    `connect` (Task 3.2) will instead join an existing bucket as a read-only consumer."""
+    `connect` joins an existing bucket as a read-only consumer and pulls it down, no source
+    credentials required."""
     from . import remote
     if args.action == "init":
         if not args.bucket:
@@ -452,7 +453,14 @@ def cmd_cloud(ws: Workspace, args) -> int:
         remote.cloud_init(ws, args.bucket, args.prefix or "", args.region or "")
         print(f"✓ cloud writer initialised: bucket={args.bucket} prefix={args.prefix or ''} role=writer")
         return 0
-    print(f"Unknown cloud action {args.action!r}. Known actions: init", file=sys.stderr)
+    if args.action == "connect":
+        if not args.bucket:
+            print("Usage: bean cloud connect --bucket NAME [--prefix P] [--region R]", file=sys.stderr)
+            return 2
+        remote.cloud_connect(ws, args.bucket, args.prefix or "", args.region or "")
+        print(f"✓ cloud consumer connected: bucket={args.bucket} prefix={args.prefix or ''} role=consumer")
+        return 0
+    print(f"Unknown cloud action {args.action!r}. Known actions: init, connect", file=sys.stderr)
     return 2
 
 
