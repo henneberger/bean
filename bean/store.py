@@ -20,6 +20,7 @@ import duckdb
 import pyarrow as pa
 
 from .lancecat import Catalog
+from .remote import commit_with_retry
 
 STATE_SCHEMA = "CREATE TABLE IF NOT EXISTS state (key TEXT PRIMARY KEY, value TEXT)"
 
@@ -58,7 +59,20 @@ class Doc:
 class Store:
     def __init__(self, ws):
         self.ws = ws  # needed to reach the Lance chunk dataset for the keyword/neighbour queries
-        self.cat = Catalog(ws.catalog_dir)
+        self.cat = Catalog(ws.catalog_dir)  # local replica: reads only in cloud-writer mode
+        # Cloud-writer mode: a Lance dataset dir's version sequence can't be both locally-written
+        # and pull-replicated (see module docstring on the caller side), so a writer never touches
+        # `self.cat` — it commits to `self._remote` (the S3 catalog) and stages changed documents
+        # in memory (`self._staging`) until they've been embedded (see `commit_source`).
+        self._cloud_writer = bool(ws.is_cloud and ws.cloud.get("role") == "writer")
+        if self._cloud_writer:
+            region = ws.cloud.get("region")
+            self._remote = Catalog(remote_uri=ws.remote_uri,
+                                   storage_options={"region": region} if region else {})
+            self._staging: dict[tuple[str, str], dict] = {}
+        else:
+            self._remote = None
+            self._staging = None
         # `state` (sync cursors etc.) is the only thing that stays in a private local DuckDB;
         # documents/revisions/edges now live on the Catalog's Lance datasets.
         self._state = duckdb.connect(str(ws.db_path))
@@ -152,6 +166,10 @@ class Store:
 
     # -- documents -------------------------------------------------------------------------------
     def get(self, source: str, doc_id: str) -> Doc | None:
+        if self._cloud_writer:
+            staged = self._staging.get((source, doc_id))
+            if staged is not None:
+                return self._doc_from_row(staged)
         con = self.cat.duck()
         try:
             row = con.execute(
@@ -163,15 +181,33 @@ class Store:
             con.close()
         return Doc(*row) if row else None
 
+    @staticmethod
+    def _doc_from_row(row: dict) -> Doc:
+        return Doc(row["source"], row["doc_id"], row["title"], row["url"], row["revision_id"],
+                   row["hash"], row["body"], row["created_at"], row["modified_at"],
+                   row["author"], row["mime"])
+
     def upsert(self, source: str, doc_id: str, *, title: str, url: str | None,
                revision_id: str | None, body: str, meta: dict | None = None) -> bool:
         """Insert or update a snapshot. Returns True when the CONTENT changed (re-embed needed).
-        `meta` carries source-native fields: created_at, modified_at, author, mime (all optional)."""
+        `meta` carries source-native fields: created_at, modified_at, author, mime (all optional).
+        In cloud-writer mode this only stages the change in memory (see `_staging`) — nothing is
+        committed to the remote catalog until `commit_source` runs after embedding."""
         h = content_hash(body)
         m = meta or {}
         created_at, modified_at = _to_ts(m.get("created_at")), _to_ts(m.get("modified_at"))
         author, mime = m.get("author"), m.get("mime")
         now = _now()
+        row = {"source": source, "doc_id": doc_id, "title": title, "url": url,
+               "revision_id": revision_id, "hash": h, "body": body,
+               "created_at": created_at, "modified_at": modified_at, "author": author,
+               "mime": mime, "fetched_at": now}
+        if self._cloud_writer:
+            existing = self.get(source, doc_id)
+            if existing and existing.hash == h:
+                return False  # metadata-only refresh: not committed in cloud mode, no churn
+            self._staging[(source, doc_id)] = row
+            return True
         con = self.cat.duck()
         try:
             existing = con.execute(
@@ -179,10 +215,6 @@ class Store:
                 [source, doc_id]).fetchone()
         finally:
             con.close()
-        row = {"source": source, "doc_id": doc_id, "title": title, "url": url,
-               "revision_id": revision_id, "hash": h, "body": body,
-               "created_at": created_at, "modified_at": modified_at, "author": author,
-               "mime": mime, "fetched_at": now}
         if existing and existing[0] == h:
             self.cat.upsert_documents([row])  # metadata-only change: embed checkpoint untouched
             return False
@@ -190,6 +222,50 @@ class Store:
         self.cat.append_revisions([{"source": source, "doc_id": doc_id,
                                     "revision_id": revision_id, "hash": h, "fetched_at": now}])
         return True
+
+    # -- cloud-writer staging / commit -------------------------------------------------------------
+    def staged_changed(self) -> list[tuple[str, str]]:
+        """(source, doc_id) keys currently staged in memory, awaiting embedding + commit. Empty
+        outside cloud-writer mode."""
+        return list(self._staging.keys()) if self._cloud_writer else []
+
+    def commit_source(self, source: str, doc_ids: list, *, chunks_by_doc: dict,
+                      edges_by_doc: dict) -> None:
+        """Commit the given (already-embedded) staged docs to the REMOTE catalog as one retryable
+        batch: documents, revisions, then each doc's chunks and edges. `chunks_by_doc` /
+        `edges_by_doc` are keyed by (source, doc_id) and supplied by the caller's embed step (2.4b).
+        Only removes the committed keys from `self._staging` after the whole batch succeeds."""
+        keys = [(source, d) for d in doc_ids if (source, d) in self._staging]
+        if not keys:
+            return
+        doc_rows = [self._staging[k] for k in keys]
+        rev_rows = [{"source": r["source"], "doc_id": r["doc_id"], "revision_id": r["revision_id"],
+                     "hash": r["hash"], "fetched_at": r["fetched_at"]} for r in doc_rows]
+
+        def _commit():
+            self._remote.upsert_documents(doc_rows)
+            # append_revisions has no dedup; delete any prior rows for these keys first so a retry
+            # (which re-runs this whole closure) can't duplicate revision history.
+            self._remote.delete_revisions(set(keys))
+            self._remote.append_revisions(rev_rows)
+            for s, d in keys:
+                self._remote.replace_chunks(s, d, chunks_by_doc.get((s, d), []))
+                self._remote.replace_edges(s, d, edges_by_doc.get((s, d), []))
+
+        commit_with_retry(_commit)
+        for k in keys:
+            del self._staging[k]
+
+    def commit_deletions(self, removed: list) -> None:
+        """Delete the given (source, doc_id) pairs from the REMOTE catalog, grouped by source, each
+        as a retryable commit. Also drops them from staging if present."""
+        by_source: dict = {}
+        for s, d in removed:
+            by_source.setdefault(s, []).append(d)
+        for s, ids in by_source.items():
+            commit_with_retry(lambda s=s, ids=ids: self._remote.delete_documents(s, ids))
+        for k in removed:
+            self._staging.pop(k, None)
 
     def delete(self, source: str, doc_id: str) -> None:
         self.cat.delete_documents(source, [doc_id])

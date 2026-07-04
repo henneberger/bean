@@ -55,14 +55,17 @@ def _copy_new_s3(remote_uri: str, local_dir: Path) -> None:
         subprocess.run(cmd, check=True)
 
 
-_RETRYABLE_MARKERS = ("conflict", "commit", "version", "retry", "concurrent")
+_RETRYABLE_MARKERS = ("conflict", "commit conflict", "retry", "concurrent")
 
 
 def _is_retryable(exc: Exception) -> bool:
     """Heuristic: the spike never triggered a real Lance commit-conflict exception, so there is no
     confirmed exception type to catch. Retry anything whose type name or message looks
     conflict-related; let everything else propagate. Replace with the confirmed type once Task 4.2's
-    real-S3 smoke surfaces one."""
+    real-S3 smoke surfaces one. Deliberately narrow: bare "commit" or "version" are dropped so an
+    unrelated "commit ..." message or a schema-version mismatch is never mistakenly retried — only
+    a genuine Lance commit conflict (which says "conflict") or an explicit retry/concurrency signal
+    triggers a retry here."""
     text = f"{type(exc).__name__} {exc}".lower()
     return any(marker in text for marker in _RETRYABLE_MARKERS)
 

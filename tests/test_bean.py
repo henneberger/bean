@@ -1354,5 +1354,101 @@ except RuntimeError:
     ok(True, "commit_with_retry re-raises the last exception after exhausting retries")
 ok(len(_exhaust_calls) == 6, "commit_with_retry made retries+1 total attempts before giving up")
 
+# cloud-writer Store plumbing: in-memory staging, replica-routed reads, remote commit (Task 2.4a) --
+_cwws = Workspace(repo("cloud-writer"))
+_cwws.save_config({"settings": {"cloud": {
+    "enabled": True, "role": "writer", "bucket": "b", "prefix": "p", "region": "us-east-1"}}})
+_cw_remote_dir = Path(tempfile.mkdtemp(prefix="bean-cw-remote-"))
+# ws.remote_uri is s3://... which is both unreachable AND unsafe to touch offline: lancedb.connect
+# probes the target during construction, so passing a real s3:// URI into Catalog(remote_uri=...)
+# makes a real outbound network call even before any table op runs. Patch Workspace.remote_uri (for
+# this instance only, via the class -- `remote_uri` is a read-only property so it can't be
+# instance-shadowed) to a local dir BEFORE constructing Store, so the cloud-writer branch in
+# `Store.__init__` builds its remote Catalog against that local dir from the start: same code path
+# (Catalog(remote_uri=...) -> lancedb.connect), zero network, fully offline.
+_orig_remote_uri_prop = Workspace.remote_uri
+Workspace.remote_uri = property(lambda self: str(_cw_remote_dir))
+try:
+    _cws_ctx = Store(_cwws)
+finally:
+    Workspace.remote_uri = _orig_remote_uri_prop
+
+with _cws_ctx as _cws:
+    ok(_cws._cloud_writer is True, "cloud + role=writer -> Store enters cloud-writer mode")
+    ok(_cws._remote is not None, "cloud-writer Store opens a remote Catalog target")
+    ok(_cws._staging == {}, "cloud-writer Store starts with empty in-memory staging")
+
+    # seed the local replica with one already-committed doc, so change-detection has a baseline.
+    _seed_cat = Catalog(_cwws.catalog_dir)
+    _seed_cat.upsert_documents([{"source": "gdocs", "doc_id": "cw1", "title": "Seed", "url": "u1",
+                                 "revision_id": "rev0", "hash": content_hash("seed body"),
+                                 "body": "seed body", "created_at": None, "modified_at": None,
+                                 "author": "Ada", "mime": None, "fetched_at": None}])
+
+    ok(_cws.upsert("gdocs", "cw2", title="New", url="u2", revision_id="rev1",
+                   body="new body") is True, "upsert of a brand-new doc stages True")
+    ok(_cws.upsert("gdocs", "cw1", title="Seed", url="u1", revision_id="rev1",
+                   body="changed body") is True, "upsert of a changed doc stages True")
+    ok(set(_cws.staged_changed()) == {("gdocs", "cw2"), ("gdocs", "cw1")},
+       "staged_changed() reports both newly-staged keys")
+    ok(_cws.upsert("gdocs", "cw1", title="Seed", url="u1", revision_id="rev1",
+                   body="changed body") is False,
+       "re-upsert of the SAME staged body returns False (no re-stage churn: a metadata-only "
+       "refresh, e.g. a title rename with identical hash, is never committed in cloud mode)")
+
+    _staged_doc = _cws.get("gdocs", "cw1")
+    ok(_staged_doc.body == "changed body", "get() overlays the staged version of a staged doc")
+    _seed_cat.upsert_documents([{"source": "gdocs", "doc_id": "cw3", "title": "ReplicaOnly",
+                                 "url": "u3", "revision_id": "rev0", "hash": content_hash("r3"),
+                                 "body": "r3", "created_at": None, "modified_at": None,
+                                 "author": None, "mime": None, "fetched_at": None}])
+    ok(_cws.get("gdocs", "cw3").body == "r3", "get() falls through to the replica for a non-staged doc")
+
+    _cws.commit_source("gdocs", ["cw1", "cw2"],
+                       chunks_by_doc={("gdocs", "cw1"): [{"id": "cw1-0", "source": "gdocs",
+                            "doc_id": "cw1", "title": "Seed", "url": "u1", "start": 0, "end": 13,
+                            "text": "changed body", "ord": 0, "vector": [0.1, 0.2]}]},
+                       edges_by_doc={("gdocs", "cw1"): [{"rel": "child_of", "dst_kind": "container",
+                                                          "dst": "folder1"}]})
+    ok(set(_cws.staged_changed()) == set(), "commit_source removes committed keys from staging")
+
+_cw_remote_check = Catalog(remote_uri=str(_cw_remote_dir))
+_cw_con = _cw_remote_check.duck()
+ok(_cw_con.execute("SELECT body FROM documents WHERE doc_id='cw1'").fetchone()[0] == "changed body",
+   "commit_source lands the changed doc's new body on the remote")
+ok(_cw_con.execute("SELECT count(*) FROM documents WHERE doc_id='cw2'").fetchone()[0] == 1,
+   "commit_source lands the brand-new doc on the remote")
+ok(_cw_con.execute("SELECT count(*) FROM revisions WHERE doc_id='cw1' AND revision_id='rev1'"
+                   ).fetchone()[0] == 1, "commit_source appends the new revision row")
+ok(_cw_con.execute("SELECT count(*) FROM chunks WHERE doc_id='cw1'").fetchone()[0] == 1,
+   "commit_source replaces chunks for the committed doc")
+ok(_cw_con.execute("SELECT count(*) FROM edges WHERE src_doc='cw1' AND rel='child_of'"
+                   ).fetchone()[0] == 1, "commit_source replaces edges for the committed doc")
+ok(_cw_con.execute("SELECT count(*) FROM documents WHERE doc_id='cw3'").fetchone()[0] == 0,
+   "the replica-only doc (never staged/committed) never reached the remote")
+_cw_con.close()
+
+Workspace.remote_uri = property(lambda self: str(_cw_remote_dir))
+try:
+    _cws2_ctx = Store(_cwws)
+finally:
+    Workspace.remote_uri = _orig_remote_uri_prop
+with _cws2_ctx as _cws2:
+    _cws2.commit_deletions([("gdocs", "cw1")])
+_cw_con2 = Catalog(remote_uri=str(_cw_remote_dir)).duck()
+ok(_cw_con2.execute("SELECT count(*) FROM documents WHERE doc_id='cw1'").fetchone()[0] == 0,
+   "commit_deletions removes the doc from the remote")
+_cw_con2.close()
+
+# a plain (non-cloud) Store is entirely unaffected: no remote, no staging, existing local-write path.
+with Store(Workspace(repo("cloud-writer-off"))) as _cwoff:
+    ok(_cwoff._cloud_writer is False, "non-cloud Store never enters cloud-writer mode")
+    ok(_cwoff._remote is None, "non-cloud Store has no remote Catalog")
+    ok(_cwoff.staged_changed() == [], "non-cloud Store's staged_changed() is always empty")
+    ok(_cwoff.upsert("gdocs", "local1", title="T", url=None, revision_id=None,
+                     body="local body") is True, "non-cloud Store still writes locally as before")
+    ok(_cwoff.get("gdocs", "local1").body == "local body",
+       "non-cloud Store's get() still reads its own local catalog directly")
+
 print(f"bean: {CHECKS - FAILED}/{CHECKS} checks passed" if FAILED == 0 else f"bean: {FAILED}/{CHECKS} checks FAILED")
 sys.exit(0 if FAILED == 0 else 1)
