@@ -1192,5 +1192,35 @@ with Store(_mig) as s:
 with Store(_mig) as s:
     ok(s.counts().get("gdocs") == 1, "second open is a no-op (no double-migration)")
 
+# regression: a crash right after the documents-copy (Lance `documents` already has the row) but
+# before revisions/edges are copied, with `catalog_migrated` still unset, must NOT drop
+# revisions/edges without migrating them first (the old `cat_populated` shortcut did exactly that
+# and silently destroyed both tables — see bean/store.py `_migrate_legacy_catalog`).
+from bean.lancecat import Catalog as _Cat
+from datetime import datetime as _dt
+_mig3 = Workspace(repo("migrate-partial"))
+_c3 = _dd.connect(str(_mig3.db_path))
+_c3.execute("CREATE TABLE documents (source TEXT, doc_id TEXT, title TEXT, url TEXT, revision_id TEXT, "
+            "hash TEXT, body TEXT, created_at TIMESTAMP, modified_at TIMESTAMP, author TEXT, mime TEXT, "
+            "fetched_at TIMESTAMP, embedded_hash TEXT)")
+_c3.execute("INSERT INTO documents VALUES ('gdocs','pz','T','u','r','h','body here',NULL,NULL,'Ada',NULL,now(),'h')")
+_c3.execute("CREATE TABLE revisions (source TEXT, doc_id TEXT, revision_id TEXT, hash TEXT, fetched_at TIMESTAMP)")
+_c3.execute("INSERT INTO revisions VALUES ('gdocs','pz','r0','h0',now())")
+_c3.execute("CREATE TABLE edges (source TEXT, src_doc TEXT, rel TEXT, dst_kind TEXT, dst TEXT)")
+_c3.execute("INSERT INTO edges VALUES ('gdocs','pz','links','doc','other-doc')")
+_c3.close()
+# Simulate the interrupted-migration state: Lance `documents` already populated for this doc (as if
+# `upsert_documents` had run once already), legacy tables still present, flag still unset.
+_Cat(_mig3.catalog_dir).upsert_documents([{
+    "source": "gdocs", "doc_id": "pz", "title": "T", "url": "u", "revision_id": "r", "hash": "h",
+    "body": "body here", "created_at": None, "modified_at": None, "author": "Ada", "mime": None,
+    "fetched_at": _dt.now(),
+}])
+with Store(_mig3) as s:
+    ok(any(r[0] == "r0" for r in s.revisions("gdocs", "pz")),
+       "migration copies revisions even when Lance documents is already populated (no data loss)")
+    ok(any(e["dst"] == "other-doc" for e in s.edges_of("gdocs", "pz")),
+       "migration copies edges even when Lance documents is already populated (no data loss)")
+
 print(f"bean: {CHECKS - FAILED}/{CHECKS} checks passed" if FAILED == 0 else f"bean: {FAILED}/{CHECKS} checks FAILED")
 sys.exit(0 if FAILED == 0 else 1)

@@ -57,6 +57,15 @@ class Catalog:
         if not rows: return
         self._ensure("revisions").add(pa.Table.from_pylist(rows, schema=SCHEMAS["revisions"]))
 
+    def delete_revisions(self, keys):
+        """Delete existing revision rows for the given (source, doc_id) pairs. `append_revisions`
+        is a raw append with no dedup; calling this first makes a subsequent append idempotent
+        under retry (e.g. a migration re-run after a crash)."""
+        t = self._table("revisions")
+        if t is None or not keys: return
+        pred = " OR ".join(f"(source = '{_esc(s)}' AND doc_id = '{_esc(d)}')" for s, d in keys)
+        t.delete(pred)
+
     def replace_edges(self, source, src_doc, rows):
         t = self._ensure("edges")
         t.delete(f"source = '{_esc(source)}' AND src_doc = '{_esc(src_doc)}'")

@@ -77,29 +77,37 @@ class Store:
         Detect a legacy `documents` TABLE sitting in `self._state`'s own catalog (NOT the read-only
         `documents` VIEW that `Catalog.duck()` registers on a *different*, throwaway connection —
         that view never appears in `self._state`'s information_schema, so a base-table check here
-        can't collide with it) and, if the Lance catalog hasn't already been populated, copy the rows
-        across once and drop the legacy tables. Guarded additionally by a `catalog_migrated` state
-        flag so a workspace that's already been migrated (and thus has legacy tables long gone) is
-        never re-scanned. `embedded_hash` is deliberately DROPPED, not carried over: the old chunk
-        vectors lived in a different Lance location with no `ord` column and are not migrated, so the
-        new catalog has documents but no chunks. Leaving the private `embedded` checkpoint empty makes
-        `embed_queue` correctly return every migrated doc as needing embedding, so the next sync
-        re-embeds them into the new chunk dataset — carrying `embedded_hash` over would make
-        `embed_queue` skip those docs and searches would return nothing for them."""
+        can't collide with it) and copy the rows across, THEN drop the legacy tables. Guarded solely
+        by a `catalog_migrated` state flag — no other shortcut — so a workspace that's already been
+        migrated (and thus has legacy tables long gone) is never re-scanned, and one that hasn't
+        finished is always retried in full rather than partially skipped.
+
+        Ordering is deliberate and crash-safe: copy documents, THEN revisions, THEN edges, and only
+        after all three succeed do we drop the legacy tables and set the flag. If the process dies
+        between any two steps, `catalog_migrated` is still unset and the legacy tables are still
+        present, so the *entire* migration (including the already-copied documents) re-runs on the
+        next open. That re-run must not lose or duplicate data:
+          - `upsert_documents` is a merge_insert on (source, doc_id) — safe to repeat.
+          - `replace_edges` deletes-then-adds per (source, src_doc) — safe to repeat.
+          - `append_revisions` is a raw append with no dedup, so we first call `delete_revisions` for
+            the exact (source, doc_id) keys being migrated — deleting whatever a prior partial run
+            already wrote for those keys — before appending, making the whole step idempotent too.
+        A previous version of this method had a `cat_populated` shortcut that, if the Lance
+        `documents` table happened to be non-empty (e.g. only the documents copy had completed before
+        a crash), would drop `revisions`/`edges` WITHOUT copying them — a silent, permanent data-loss
+        bug. That shortcut has been removed; do not reintroduce a documents-only "already done" check.
+
+        `embedded_hash` is deliberately DROPPED, not carried over: the old chunk vectors lived in a
+        different Lance location with no `ord` column and are not migrated, so the new catalog has
+        documents but no chunks. Leaving the private `embedded` checkpoint empty makes `embed_queue`
+        correctly return every migrated doc as needing embedding, so the next sync re-embeds them into
+        the new chunk dataset — carrying `embedded_hash` over would make `embed_queue` skip those docs
+        and searches would return nothing for them."""
         if self.get_state("catalog_migrated"):
             return
         has_legacy = self._state.execute(
             "SELECT count(*) FROM duckdb_tables() WHERE table_name = 'documents'").fetchone()[0] > 0
         if not has_legacy:
-            self.set_state("catalog_migrated", True)
-            return
-        cat_populated = self.cat._table("documents") is not None and self.cat._table("documents").count_rows() > 0
-        if cat_populated:
-            # Lance catalog already has documents (e.g. a manual/partial prior migration) — don't
-            # clobber it with the legacy rows; just drop the now-redundant legacy tables and stop.
-            self._state.execute("DROP TABLE documents")
-            self._state.execute("DROP TABLE revisions")
-            self._state.execute("DROP TABLE edges")
             self.set_state("catalog_migrated", True)
             return
         docs = self._state.execute(
@@ -116,7 +124,9 @@ class Store:
         if docs:
             self.cat.upsert_documents([dict(zip(doc_cols, r)) for r in docs])
         if revs:
-            self.cat.append_revisions([dict(zip(rev_cols, r)) for r in revs])
+            rev_rows = [dict(zip(rev_cols, r)) for r in revs]
+            self.cat.delete_revisions({(r["source"], r["doc_id"]) for r in rev_rows})
+            self.cat.append_revisions(rev_rows)
         by_src_doc: dict = {}
         for r in edges:
             row = dict(zip(edge_cols, r))
@@ -124,6 +134,8 @@ class Store:
                 {"rel": row["rel"], "dst_kind": row["dst_kind"], "dst": row["dst"]})
         for (source, src_doc), rows in by_src_doc.items():
             self.cat.replace_edges(source, src_doc, rows)
+        # Only after all three copies have succeeded do we drop the legacy tables and set the flag —
+        # a crash before this point leaves the legacy tables intact for a full, safe retry.
         self._state.execute("DROP TABLE documents")
         self._state.execute("DROP TABLE revisions")
         self._state.execute("DROP TABLE edges")
