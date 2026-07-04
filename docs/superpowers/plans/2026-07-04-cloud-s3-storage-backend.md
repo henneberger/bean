@@ -356,90 +356,75 @@ git add bean/index.py bean/store.py tests/test_bean.py
 git commit -m "feat: store chunk ord at embed time; drop the window function"
 ```
 
-### Task 1.4: Only-write-after-embed — remove `embed_queue`/`embedded_hash`; rework `run_sync`
+### Task 1.4: Make `embedded_hash` a private local checkpoint (out of the shared catalog)
+
+> **Resolution of a spec/plan conflict (human-decided during execution).** Spec decision 6 ("drop `embedded_hash`; resumability from cursors advanced only after commit") breaks in local mode: bean's connectors write doc rows AND advance their sync cursors DURING fetch, decoupled from embedding, so without a checkpoint an interrupted embed permanently orphans a doc row (its content hash is unchanged next sync, so it's never re-embedded). The existing suite tests interrupted-embed resume, so this is real. Chosen fix: **keep `embedded_hash` and its `embed_queue`/`mark_embedded` machinery, but move `embedded_hash` OUT of the shared `documents` dataset into a PRIVATE local table.** `embedded_hash`'s only real problem was being a *shared/multi-writer* field; as private per-writer bookkeeping it's fine and preserves resumability exactly. The "shared store contains only embedded docs" guarantee is enforced later, at the **S3 commit filter (Phase 2, Task 2.4)** — a writer commits to the shared `documents` dataset only docs whose private `embedded_hash == hash`. `run_sync` and the existing interrupted-resume test are essentially unchanged; only the checkpoint's *location* moves.
 
 **Files:**
-- Modify: `bean/sync.py`
-- Modify: `bean/store.py` (delete `embed_queue`, `mark_embedded`; drop `embedded_hash` migration)
-- Modify: `tests/test_bean.py` (rewrite the 568–593 checkpoint block; adjust `reembed` at 35–39)
+- Modify: `bean/lancecat.py` (remove `embedded_hash` from `SCHEMAS["documents"]` — back to Task 1.1's clean schema)
+- Modify: `bean/store.py` (private `embedded` table; rework `embed_queue`/`mark_embedded`; simplify `upsert` — drop the embedded_hash juggling added in 1.2)
+- Modify: `tests/test_bean.py` only if a check assumed `embedded_hash` lives in `documents` (the interrupted-resume block should keep passing as-is)
 
 **Interfaces:**
 - Consumes: `Store` (1.2), `Catalog` (1.1).
-- Produces: `run_sync(...) -> {"changed", "removed", "errors", "chunks", "embedded"}` — same keys as today; `embedded` now = count of docs embedded this run (the changed set), not a queue drain. Fetch→embed→commit per source; cursor advances only after a source's commit succeeds.
+- Produces: `Store.embed_queue(sources=None, *, force=False)` and `Store.mark_embedded(source, doc_id)` — same signatures/behavior as today, but the checkpoint reads/writes a PRIVATE local table `embedded(source, doc_id, embedded_hash)` instead of a column on the shared `documents` dataset. `run_sync` keeps its current embed-queue-driven flow (unchanged return shape).
 
-- [ ] **Step 1: Rewrite the checkpoint test to the new model**
+- [ ] **Step 1: Confirm the interrupted-resume test still expresses the guarantee**
 
-Replace `tests/test_bean.py:568-593` with a test of the new guarantee (interrupted sync re-embeds from the cursor; docs only exist post-embed). New block:
+The existing checkpoint block (interrupted embed → resume drains the queue → an edited doc re-enters the queue) is still the correct spec and should keep passing. Do NOT rewrite it to a "changed set" model. If any assertion referenced `embedded_hash` as a `documents` column directly, adjust only that reference. First run `make test` and note it's green at 207 before changing anything.
 
-```python
-# sync: an interrupted embed leaves no half-written docs; resume re-embeds the changed set
-ckws = Workspace(repo("checkpoint"))
-ckws.save_config({"localfiles": {"paths": [str(docs_dir)]}})  # a real source with changed docs
-# (use a small fake fetch source or localfiles dir prepared above)
-_boom = {"n": 0}
-def flaky_embed(texts):
-    _boom["n"] += 1
-    if _boom["n"] == 2: raise RuntimeError("interrupted")
-    return fake_embed(texts)
-try:
-    run_sync(ckws, keys={"localfiles"}, embed_fn=flaky_embed)
-    ok(False, "interrupted embed should propagate")
-except RuntimeError:
-    ok(True, "an embed failure interrupts the sync")
-# after failure: no partial docs committed for the un-embedded ones; resume finishes cleanly
-r = run_sync(ckws, keys={"localfiles"}, embed_fn=fake_embed)
-with Store(ckws) as s:
-    ok(s.counts().get("localfiles", 0) > 0, "resume embeds and commits the changed docs")
-```
+- [ ] **Step 2: Remove `embedded_hash` from the shared schema**
 
-Also update `reembed` (lines 35–39) to not rely on `embed_queue`: it stays `run_sync(ws, full=True, refetch=False, …)`, but `full=True` now means "re-embed every stored doc" — implement that in `run_sync` by treating all stored docs as the changed set when `full`.
+In `bean/lancecat.py`, delete the `embedded_hash` field from `SCHEMAS["documents"]` (restoring Task 1.1's schema). The shared `documents` dataset no longer carries it.
 
-- [ ] **Step 2: Run it, verify it fails**
+- [ ] **Step 3: Add the private `embedded` table and rework the checkpoint**
 
-Run: `make test`
-Expected: FAIL — `embed_queue`/`mark_embedded` still referenced, or the new resume semantics not yet implemented.
-
-- [ ] **Step 3: Implement the new `run_sync`**
-
-Replace the embed-queue section. New flow (per the spec's Data flow):
-
-```python
-# after the fetch loop produced `changed` = [(src_key, doc_id), ...] and `removed`
-# group changed by source; embed each doc; commit chunks then documents were already
-# written by fetch's store.upsert — INSTEAD: fetch stages docs but we only commit post-embed.
-```
-
-Concretely: fetch still calls `store.upsert` (which now writes to the Lance `documents` dataset). To honor "only write after embed," restructure so `store.upsert` during fetch writes to a **staging** area OR — simpler and matching today's connector contract — keep upsert writing the doc row, but embed **immediately** per changed doc within the same run and commit chunks in the same pass, and advance the cursor only after the whole source's changed set is embedded. Since local mode has no partial-visibility concern, the practical guarantee is: **`embedded` docs = the run's `changed` set; embed them, write chunks, then the connector's cursor (already set via `set_state`) is durable.** Remove `embed_queue`/`mark_embedded`; the changed set drives embedding directly:
-
-```python
-embed_targets = changed if not full else [(s, d) for s in scope_sources for d in store.doc_ids(s)]
-chunks_indexed = 0
-for source, doc_id in embed_targets:
-    chunks_indexed += _embed_rows(ws, store, source, doc_id, embed_fn, cfgmod.chunking_for(settings, source))
-for source, doc_id in removed:
-    delete_doc(ws, source, doc_id)
-if embed_targets or removed:
-    ensure_indexes(ws, log=log)
-# edges + state as today
-return {"changed": changed, "removed": removed, "errors": errors,
-        "chunks": chunks_indexed, "embedded": len(embed_targets)}
-```
-
-Delete `Store.embed_queue`, `Store.mark_embedded`, and the `embedded_hash` column/migration in `store.py`.
-
-> Note: full cursor-advance-after-commit ordering matters for the *S3 writer* (Phase 2), where a commit can fail. In local mode there's no commit step to fail, so this task just removes the checkpoint machinery. Phase 2, Task 2.4 adds the pull/commit/advance ordering.
+In `bean/store.py`:
+- In `__init__`, create the private table in the same private DuckDB that holds `state` (`ws.db_path`):
+  ```python
+  self._state.execute("CREATE TABLE IF NOT EXISTS embedded ("
+                      "source TEXT, doc_id TEXT, embedded_hash TEXT, PRIMARY KEY (source, doc_id))")
+  ```
+- `mark_embedded(source, doc_id)`: read the doc's current `hash` from the catalog, then upsert the private table:
+  ```python
+  h = self.get(source, doc_id).hash
+  self._state.execute("INSERT INTO embedded (source, doc_id, embedded_hash) VALUES (?, ?, ?) "
+                      "ON CONFLICT (source, doc_id) DO UPDATE SET embedded_hash = excluded.embedded_hash",
+                      [source, doc_id, h])
+  ```
+- `embed_queue(sources=None, *, force=False)`: the "needs embedding" set is docs whose current `hash` has no matching private `embedded_hash`. ATTACH the private DB into the catalog read connection and join, preserving the oldest-first order:
+  ```python
+  con = self.cat.duck()
+  con.execute(f"ATTACH '{self.ws.db_path}' AS priv (READ_ONLY)")
+  where = ["1=1"]; params = []
+  if sources is not None:
+      marks = ",".join("?" * len(sources)) or "NULL"
+      where.append(f"d.source IN ({marks})"); params += list(sources)
+  join_pred = "" if force else \
+      "AND (e.embedded_hash IS NULL OR e.embedded_hash <> d.hash)"
+  rows = con.execute(
+      f"SELECT d.source, d.doc_id FROM documents d "
+      f"LEFT JOIN priv.embedded e ON d.source=e.source AND d.doc_id=e.doc_id "
+      f"WHERE {' AND '.join(where)} {join_pred} "
+      "ORDER BY COALESCE(d.modified_at, d.fetched_at) ASC, d.doc_id ASC", params).fetchall()
+  return [(r[0], r[1]) for r in rows]
+  ```
+  (When `force=True`, every doc is returned — matching today's `--rebuild`. Confirm the ATTACH path is read-only and that a workspace whose private DB has an empty `embedded` table still returns all docs as needing embedding.)
+- `upsert`: REMOVE the `embedded_hash` handling the 1.2 task threaded through it (the `documents` row no longer has that field). `upsert` just writes metadata (same-hash path) or the full row + revision (changed path).
 
 - [ ] **Step 4: Run tests**
 
 Run: `make test`
-Expected: full suite green — `bean: N/N checks passed`.
+Expected: full suite green — the interrupted-resume block still passes, now driven by the private checkpoint. `bean sql` over `documents` no longer shows an `embedded_hash` column (fine — it was internal).
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add bean/sync.py bean/store.py tests/test_bean.py
-git commit -m "feat: only-write-after-embed; remove embed_queue/embedded_hash"
+git add bean/lancecat.py bean/store.py tests/test_bean.py
+git commit -m "refactor: move embedded_hash to a private local checkpoint (out of the shared catalog)"
 ```
+
+> **Phase 2 carry-forward (Task 2.4):** the writer's S3 commit of `documents` must include only docs whose private `embedded_hash == hash`, so the shared dataset never receives an un-embedded row. Recorded so Phase 2 honors the "only write after embed" guarantee at the commit boundary.
 
 ### Task 1.5: Local format migration (bean.duckdb tables → Lance datasets)
 
