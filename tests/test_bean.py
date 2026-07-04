@@ -1146,6 +1146,10 @@ ok(_rc == 0 and "1" in _okbuf.getvalue(), "cmd_sql runs a SELECT and prints the 
 with _ctx.redirect_stdout(_io.StringIO()):
     ok(cmd_sql(_sqlws, _sql("WITH", "x", "AS", "(SELECT", "1", "AS", "n)", "SELECT", "*", "FROM", "x")) == 0,
        "cmd_sql allows a WITH … SELECT CTE")
+_statebuf = _io.StringIO()
+with _ctx.redirect_stdout(_statebuf):
+    _src = cmd_sql(_sqlws, _sql("SELECT", "count(*)", "FROM", "state"))
+ok(_src == 0, "cmd_sql exposes the state table (SELECT from state succeeds)")
 
 # == Lance catalog: relational tables on Lance, queried via DuckDB =============================
 from bean.lancecat import Catalog  # noqa: E402

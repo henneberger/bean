@@ -439,7 +439,7 @@ def cmd_config(ws: Workspace, args) -> int:
 
 
 # -- sql ----------------------------------------------------------------------------------------
-_SQL_SCHEMA = """bean keeps everything in a per-workspace DuckDB. Query it READ-ONLY:
+_SQL_SCHEMA = """bean stores documents/revisions/edges/chunks in a Lance catalog + a private state table. Query READ-ONLY:
   bean sql "SELECT ..."        (only SELECT / WITH)      add --global for the shared cross-repo store
 
 TABLES
@@ -483,6 +483,14 @@ def cmd_sql(ws: Workspace, args) -> int:
         ds = chunks_dataset(target)
         if ds is not None:
             con.register("_chunks", ds)
+        # Attach the private state table if it exists so `SELECT ... FROM state` works.
+        if target.db_path.exists():
+            try:
+                con.execute(f"ATTACH '{target.db_path}' AS _priv (READ_ONLY)")
+                con.execute("CREATE VIEW state AS SELECT * FROM _priv.state")
+            except Exception:
+                # Guard: if the state table doesn't exist in the private db, skip the view.
+                pass
         try:
             cur = con.execute(query)
             cols = [d[0] for d in cur.description]
