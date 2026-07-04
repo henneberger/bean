@@ -4,7 +4,9 @@ existing SQL query and `bean sql` runs unchanged. Writes are immutable Lance ops
 delete-predicate + add / append). This is the storage substrate `Store` sits on."""
 from __future__ import annotations
 from pathlib import Path
-import duckdb, lancedb, pyarrow as pa
+import duckdb
+import lancedb
+import pyarrow as pa
 
 _TS = pa.timestamp("us")
 SCHEMAS = {
