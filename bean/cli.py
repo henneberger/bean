@@ -318,7 +318,14 @@ def cmd_sync(ws: Workspace, args) -> int:
 
 
 # -- retrieval ----------------------------------------------------------------------------------
-def _print_hits(query: str | None, hits: list[dict], empty: str) -> int:
+#: default per-hit character budget when --full is given without a number.
+FULL_DEFAULT_CHARS = 4000
+
+
+def _print_hits(query: str | None, hits: list[dict], empty: str, full: int | None = None) -> int:
+    """Render hits. By default each hit shows a short preview (5 lines × 110 chars). When `full`
+    is set it prints the whole body up to `full` characters per hit (0 = no cap), so a snippet is
+    never silently truncated."""
     if not hits:
         print(empty)
         return 1
@@ -329,8 +336,23 @@ def _print_hits(query: str | None, hits: list[dict], empty: str) -> int:
         score = f"  (score {h['score']})" if h.get("score") is not None else ""
         print(f"\n{i:2}. {where}{score}")
         text = h.get("context") or h.get("text") or ""
-        for line in [l.strip() for l in text.splitlines() if l.strip()][:5]:
-            print(f"      {line[:110]}")
+        lines = [l.strip() for l in text.splitlines() if l.strip()]
+        if full is None:  # short preview
+            for line in lines[:5]:
+                print(f"      {line[:110]}")
+            continue
+        budget = full if full > 0 else None  # 0 = unlimited
+        shown, cut = 0, False
+        for line in lines:
+            room = None if budget is None else budget - shown
+            if room is not None and room <= 0:
+                cut = True
+                break
+            out = line if room is None else line[:room]
+            print(f"      {out}")
+            shown += len(out)
+        if cut:
+            print(f"      … (truncated at {full} chars — pass a larger --full N, or --full 0 for all)")
     return 0
 
 
@@ -343,34 +365,36 @@ def cmd_search(ws: Workspace, args) -> int:
                        source=args.source, doc_like=args.doc, expand=args.expand,
                        author=args.author, since=args.since, before=args.before)
     return _print_hits(query, hits,
-                       "No matches. Have you run `bean sync`? (`bean status` shows what's indexed.)")
+                       "No matches. Have you run `bean sync`? (`bean status` shows what's indexed.)",
+                       full=args.full)
 
 
 def cmd_recent(ws: Workspace, args) -> int:
     hits = recent_many(_retrieval_wss(ws), source=args.source, doc_like=args.doc,
                        author=args.author, since=args.since, before=args.before, limit=args.limit)
-    return _print_hits(None, hits, "Nothing indexed yet — run `bean sync`.")
+    return _print_hits(None, hits, "Nothing indexed yet — run `bean sync`.", full=args.full)
 
 
 def cmd_related(ws: Workspace, args) -> int:
     hits = related_many(_retrieval_wss(ws), args.ref, source=args.source, limit=args.limit)
     return _print_hits(None, hits,
-                       f'No documents related to "{args.ref}" (graph edges build on `bean sync`).')
+                       f'No documents related to "{args.ref}" (graph edges build on `bean sync`).',
+                       full=args.full)
 
 
 def cmd_thread(ws: Workspace, args) -> int:
     hits = thread_many(_retrieval_wss(ws), args.ref, source=args.source)
-    return _print_hits(None, hits, f'No thread/document matching "{args.ref}".')
+    return _print_hits(None, hits, f'No thread/document matching "{args.ref}".', full=args.full)
 
 
 def cmd_doc(ws: Workspace, args) -> int:
     hits = document_many(_retrieval_wss(ws), args.ref, source=args.source)
-    return _print_hits(None, hits, f'No document matching "{args.ref}".')
+    return _print_hits(None, hits, f'No document matching "{args.ref}".', full=args.full)
 
 
 def cmd_neighbors(ws: Workspace, args) -> int:
     hits = neighbors_many(_retrieval_wss(ws), args.chunk_id, radius=args.radius)
-    return _print_hits(None, hits, f'No chunk "{args.chunk_id}".')
+    return _print_hits(None, hits, f'No chunk "{args.chunk_id}".', full=args.full)
 
 
 # -- plugins ------------------------------------------------------------------------------------
@@ -525,8 +549,15 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--since", type=int, default=90)
     p.set_defaults(fn=cmd_sync)
 
+    def add_full(parser, default=None):
+        parser.add_argument("--full", type=int, nargs="?", const=FULL_DEFAULT_CHARS, default=default,
+                            metavar="N",
+                            help="print full bodies instead of a 5-line preview, capped at N chars "
+                                 f"per hit (bare --full = {FULL_DEFAULT_CHARS}; --full 0 = no cap)")
+
     p = sub.add_parser("search", help="hybrid semantic + keyword search")
     p.add_argument("query", nargs="+")
+    add_full(p)
     p.add_argument("--variant", action="append",
                    help="an extra query variant to fuse (repeatable) — e.g. a paraphrase or the "
                         "identifiers you spotted; weighted-RRF fuses them with the main query")
@@ -546,27 +577,32 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--since", help="only docs modified on/after this date (YYYY-MM-DD)")
     p.add_argument("--before", help="only docs modified before this date (YYYY-MM-DD)")
     p.add_argument("--limit", type=int, default=20)
+    add_full(p)
     p.set_defaults(fn=cmd_recent)
 
     p = sub.add_parser("related", help="documents one hop away in the graph (same repo/project/channel/author)")
     p.add_argument("ref", help="a doc id/title substring to expand from")
     p.add_argument("--source", choices=SOURCE_KEYS)
     p.add_argument("--limit", type=int, default=20)
+    add_full(p)
     p.set_defaults(fn=cmd_related)
 
     p = sub.add_parser("thread", help="a whole thread/document as one block")
     p.add_argument("ref")
     p.add_argument("--source", choices=SOURCE_KEYS)
+    add_full(p, default=0)  # whole-body command: full by default, no cap
     p.set_defaults(fn=cmd_thread)
 
     p = sub.add_parser("doc", help="full document body")
     p.add_argument("ref")
     p.add_argument("--source", choices=SOURCE_KEYS)
+    add_full(p, default=0)  # whole-body command: full by default, no cap
     p.set_defaults(fn=cmd_doc)
 
     p = sub.add_parser("neighbors", help="chunks surrounding a chunk id")
     p.add_argument("chunk_id")
     p.add_argument("--radius", type=int, default=3)
+    add_full(p, default=0)  # whole-body command: full by default, no cap
     p.set_defaults(fn=cmd_neighbors)
 
     p = sub.add_parser("config", help="view or set configuration")

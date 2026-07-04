@@ -1045,5 +1045,38 @@ with _store("acme-plugin") as s:
 _cfg.save_global({})  # reset global config
 _S.reload_sources()
 
+# --- CLI rendering: preview vs --full -----------------------------------------------------------
+import io
+from contextlib import redirect_stdout
+from bean.cli import _print_hits  # noqa: E402
+
+_long = "\n".join(f"line {i} " + "x" * 200 for i in range(12))
+_hit = [{"doc_id": "d1", "title": "Doc One", "text": _long}]
+
+
+def _render(**kw):
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        _print_hits(None, _hit, "empty", **kw)
+    return buf.getvalue()
+
+prev = _render()  # default preview
+ok(prev.count("line ") == 5, "preview caps at 5 lines")
+ok("xxxx" in prev and max(len(l) for l in prev.splitlines()) < 130, "preview truncates each line to ~110 chars")
+
+full = _render(full=0)  # no cap
+ok(full.count("line ") == 12, "--full 0 prints every line")
+ok("x" * 200 in full, "--full 0 does not truncate line length")
+
+capped = _render(full=300)  # char budget
+ok("truncated at 300 chars" in capped, "--full N under budget prints a truncation notice")
+ok(len(capped) < len(full), "--full N caps output shorter than unlimited")
+
+_ebuf = io.StringIO()
+with redirect_stdout(_ebuf):
+    _erc = _print_hits(None, [], "nothing here", full=0)
+ok(_erc == 1 and "nothing here" in _ebuf.getvalue(),
+   "empty hits still print the empty message under --full")
+
 print(f"bean: {CHECKS - FAILED}/{CHECKS} checks passed" if FAILED == 0 else f"bean: {FAILED}/{CHECKS} checks FAILED")
 sys.exit(0 if FAILED == 0 else 1)

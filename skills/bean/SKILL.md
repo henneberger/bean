@@ -34,6 +34,13 @@ bean gives you a **toolbox of retrieval commands**. Don't just run one search �
 context the question needs, then compose calls. Every command prints human-readable text — read its
 output. All accept `--source {slack|gdocs|github|localfiles}` to scope by connector.
 
+**Previews are truncated by default** (5 lines × ~110 chars per hit) so a list stays scannable —
+**don't conclude from a preview alone**. `search`/`recent`/`related` take **`--full [N]`** to print
+whole bodies: bare `--full` caps at 4000 chars/hit, `--full 8000` sets your own cap, `--full 0` is
+uncapped. `thread`/`doc`/`neighbors` already print full bodies (they're whole-document commands);
+pass `--full N` there to *cap* them. Reach for `--full` the moment a preview looks cut off — it's
+faster than the `sql`/`substr` workaround.
+
 - **`search "<q>"`** — hybrid semantic + keyword (the default), fused with weighted RRF. Keyword
   fusion means exact tokens (identifiers, error strings, ticket numbers, `#channels`) are found even
   when not semantically close. Flags:
@@ -51,8 +58,8 @@ output. All accept `--source {slack|gdocs|github|localfiles}` to scope by connec
 - **`related <ref>`** — documents one hop away in the graph: same repo/project/channel or same
   author, and directly linked docs. Each hit says *why* (`reason`). Use to widen from one doc to its
   neighbourhood ("what else touches this ticket's project?").
-- **`thread <ref>` / `doc <ref>`** — a whole Slack thread / document as one block,
-  matched by id or title substring. Use when a snippet isn't enough.
+- **`thread <ref>` / `doc <ref>`** — a whole Slack thread / document as one block (full body by
+  default), matched by id or title substring. Use when a snippet isn't enough.
 - **`neighbors <chunk-id>`** — the chunks surrounding a specific hit (each hit has an `id`).
 - **`sql "<SELECT …>"`** — drop to **read-only SQL** (SELECT/WITH only) over the workspace's DuckDB:
   tables `documents`, `edges`, `state`, and the Lance `_chunks` dataset. Use it for structured
