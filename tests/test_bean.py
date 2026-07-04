@@ -1438,6 +1438,8 @@ with _cws2_ctx as _cws2:
 _cw_con2 = Catalog(remote_uri=str(_cw_remote_dir)).duck()
 ok(_cw_con2.execute("SELECT count(*) FROM documents WHERE doc_id='cw1'").fetchone()[0] == 0,
    "commit_deletions removes the doc from the remote")
+ok(_cw_con2.execute("SELECT count(*) FROM chunks WHERE doc_id='cw1'").fetchone()[0] == 0,
+   "commit_deletions also cascades to remove the doc's chunks (no orphaned, still-searchable vectors)")
 _cw_con2.close()
 
 # a plain (non-cloud) Store is entirely unaffected: no remote, no staging, existing local-write path.
@@ -1449,6 +1451,53 @@ with Store(Workspace(repo("cloud-writer-off"))) as _cwoff:
                      body="local body") is True, "non-cloud Store still writes locally as before")
     ok(_cwoff.get("gdocs", "local1").body == "local body",
        "non-cloud Store's get() still reads its own local catalog directly")
+
+# -- Task 2.4b: chunk_rows extraction, ensure_indexes(table=...), snapshot/restore_state --------
+from bean.index import chunk_rows as _chunk_rows, ensure_indexes as _ensure_indexes  # noqa: E402
+from bean.chunks import Chunk as _CRChunk  # noqa: E402
+
+_cr_chunks = [_CRChunk(id="d#0", start=1, end=2, text="one"),
+              _CRChunk(id="d#1", start=3, end=4, text="two"),
+              _CRChunk(id="d#0-large", start=1, end=4, text="one\ntwo")]
+_cr_vectors = [[0.1, 0.2], [], [0.3, 0.4]]  # the second chunk has no vector -> skipped
+_cr_rows = _chunk_rows("gdocs", "d", "Title", "http://u", _cr_chunks, _cr_vectors)
+ok(len(_cr_rows) == 2, "chunk_rows skips the chunk with no vector")
+ok(_cr_rows[0]["id"] == "d#0" and _cr_rows[0]["ord"] == 0 and _cr_rows[0]["vector"] == [0.1, 0.2],
+   "chunk_rows numbers the base chunk 0 and carries its vector")
+ok(_cr_rows[1]["id"] == "d#0-large" and _cr_rows[1]["ord"] is None,
+   "chunk_rows gives a -large chunk ord=None")
+ok(_cr_rows[0]["source"] == "gdocs" and _cr_rows[0]["doc_id"] == "d" and _cr_rows[0]["text"] == "one",
+   "chunk_rows carries source/doc_id/text through")
+
+# snapshot_state / restore_state: only `state`, never `embedded`.
+_ss_ws = Workspace(repo("snapshot-state"))
+with Store(_ss_ws) as _ss:
+    _ss.set_state("k1", "a")
+    _ss_snap = _ss.snapshot_state()
+    _ss.set_state("k1", "b")
+    _ss.set_state("k2", "c")
+    _ss.mark_embedded("nosrc", "nodoc")  # embedded table gets a row unrelated to state
+    _ss_embedded_before = _ss._state.execute("SELECT count(*) FROM embedded").fetchone()[0]
+    _ss.restore_state(_ss_snap)
+    ok(_ss.get_state("k1") == "a", "restore_state rolls k1 back to its snapshotted value")
+    ok(_ss.get_state("k2") is None, "restore_state drops a key set after the snapshot")
+    _ss_embedded_after = _ss._state.execute("SELECT count(*) FROM embedded").fetchone()[0]
+    ok(_ss_embedded_after == _ss_embedded_before,
+       "restore_state never touches the embedded checkpoint table")
+
+# ensure_indexes(table=...): building indexes on a remote (local-dir) catalog's chunks table.
+_ei_remote_dir = Path(tempfile.mkdtemp(prefix="bean-ei-remote-"))
+_ei_cat = Catalog(remote_uri=str(_ei_remote_dir))
+_ei_cat.replace_chunks("gdocs", "d1", [{"id": "d1#0", "source": "gdocs", "doc_id": "d1",
+                       "title": "T", "url": "", "start": 0, "end": 1, "text": "hi",
+                       "vector": [0.1, 0.2], "ord": 0}])
+_ei_tbl = _ei_cat.table("chunks")
+ok(_ei_tbl is not None, "Catalog.table() returns the chunks table after a write")
+try:
+    _ensure_indexes(_ss_ws, table=_ei_tbl, log=lambda m: None)
+    ok(True, "ensure_indexes(table=...) runs against a remote catalog's table without raising")
+except Exception as err:
+    ok(False, f"ensure_indexes(table=...) raised: {err}")
 
 print(f"bean: {CHECKS - FAILED}/{CHECKS} checks passed" if FAILED == 0 else f"bean: {FAILED}/{CHECKS} checks FAILED")
 sys.exit(0 if FAILED == 0 else 1)

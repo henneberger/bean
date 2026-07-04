@@ -40,6 +40,12 @@ class Catalog:
     def _table(self, name):
         return self.db.open_table(name) if name in self.db.table_names() else None
 
+    def table(self, name):
+        """Public accessor for a raw lancedb table (or None if it doesn't exist yet) — lets callers
+        outside this module (e.g. `index.ensure_indexes` targeting a remote catalog) reach a table
+        without poking at the private `_table`."""
+        return self._table(name)
+
     def _ensure(self, name):
         t = self._table(name)
         if t is None and name in SCHEMAS:

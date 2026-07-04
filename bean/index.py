@@ -27,24 +27,32 @@ def _table(db):
     return db.open_table(TABLE) if TABLE in db.table_names() else None
 
 
-def reindex_doc(ws, *, source: str, doc_id: str, title: str, url: str | None,
-                chunks, vectors) -> int:
-    """Replace every chunk row for one document (delete + add). Idempotent per snapshot."""
-    db = _db(ws)
-    tbl = _table(db)
+def chunk_rows(source: str, doc_id: str, title: str, url: str | None, chunks, vectors) -> list[dict]:
+    """Build the chunk row dicts for one document (id/source/doc_id/title/url/start/end/text/ord/
+    vector), skipping chunks with no vector. Base chunks are numbered 0,1,2,… in `start` order
+    (the order `chunks` arrives in); the coarse doc-level "…-large" chunks get `ord = None` and are
+    excluded by `_BASE`'s filter. Pure — no I/O — so the cloud-writer path can build rows to hand to
+    `Store.commit_source` without ever writing them locally."""
     rows = []
     ord_ctr = 0
     for c, v in zip(chunks, vectors):
         if not v:
             continue
-        # base chunks are numbered 0,1,2,… in `start` order (the order `chunks` arrives in); the
-        # coarse doc-level "…-large" chunks get `ord = None` and are excluded by `_BASE`'s filter.
         is_large = c.id.endswith("-large")
         rows.append({"id": c.id, "source": source, "doc_id": doc_id, "title": title,
                      "url": url or "", "start": c.start, "end": c.end, "text": c.text,
                      "vector": v, "ord": None if is_large else ord_ctr})
         if not is_large:
             ord_ctr += 1
+    return rows
+
+
+def reindex_doc(ws, *, source: str, doc_id: str, title: str, url: str | None,
+                chunks, vectors) -> int:
+    """Replace every chunk row for one document (delete + add). Idempotent per snapshot."""
+    db = _db(ws)
+    tbl = _table(db)
+    rows = chunk_rows(source, doc_id, title, url, chunks, vectors)
     # An embedding-model swap changes the vector width; the existing table's fixed-size vector
     # column can't hold the new vectors (Lance raises on the cast). A dimension change requires a
     # `--rebuild`, which re-embeds every doc — so drop the stale table and let it be recreated at
@@ -80,12 +88,16 @@ def delete_doc(ws, source: str, doc_id: str) -> None:
         tbl.delete(f"source = '{_esc(source)}' AND doc_id = '{_esc(doc_id)}'")
 
 
-def ensure_indexes(ws, log=lambda m: None) -> None:
+def ensure_indexes(ws, *, table=None, log=lambda m: None) -> None:
     """Build the indexes retrieval leans on, idempotently (safe to call after every sync):
     scalar indexes on the `source`/`doc_id` columns we filter and delete by, and — once the table
     is large enough to warrant it — a cosine ANN index on `vector`. Cheap to re-run: Lance skips a
-    column that is already indexed, and we only (re)train the vector index when it's missing."""
-    tbl = _table(_db(ws))
+    column that is already indexed, and we only (re)train the vector index when it's missing.
+
+    `table`, when given, is an already-open lancedb table (e.g. a remote `Catalog`'s `chunks`
+    table) to index instead of the local workspace's — lets the cloud orchestration build indexes
+    on the S3 catalog. Default (None) keeps indexing the local workspace, unchanged."""
+    tbl = table if table is not None else _table(_db(ws))
     if tbl is None:
         return
     existing = {i.get("columns", [None])[0] if isinstance(i, dict) else getattr(i, "columns", [None])[0]

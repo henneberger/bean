@@ -258,12 +258,21 @@ class Store:
 
     def commit_deletions(self, removed: list) -> None:
         """Delete the given (source, doc_id) pairs from the REMOTE catalog, grouped by source, each
-        as a retryable commit. Also drops them from staging if present."""
+        as a retryable commit — documents AND their chunks/edges, so a removed doc's vectors and
+        relationships don't linger orphaned (and searchable) on the remote. Also drops them from
+        staging if present."""
         by_source: dict = {}
         for s, d in removed:
             by_source.setdefault(s, []).append(d)
+
+        def _commit(s, ids):
+            self._remote.delete_documents(s, ids)
+            for d in ids:
+                self._remote.replace_chunks(s, d, [])
+                self._remote.replace_edges(s, d, [])
+
         for s, ids in by_source.items():
-            commit_with_retry(lambda s=s, ids=ids: self._remote.delete_documents(s, ids))
+            commit_with_retry(lambda s=s, ids=ids: _commit(s, ids))
         for k in removed:
             self._staging.pop(k, None)
 
@@ -301,7 +310,7 @@ class Store:
             params += list(sources)
         join_pred = "" if force else \
             "AND (e.embedded_hash IS NULL OR e.embedded_hash <> d.hash)"
-        t = self.cat._table("documents")
+        t = self.cat.table("documents")
         lance_view = t.to_lance() if t is not None else \
             pa.Table.from_pylist([], schema=Catalog.SCHEMAS["documents"])
         self._state.register("_cat_documents", lance_view)
@@ -520,3 +529,17 @@ class Store:
             "INSERT INTO state (key, value) VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET value=excluded.value",
             [key, json.dumps(value)],
         )
+
+    def snapshot_state(self) -> list[tuple[str, str]]:
+        """All (key, value) rows currently in `state` — a cheap point-in-time copy the cloud
+        orchestration takes before a source's sync, so a failed commit can roll sync cursors back
+        without touching `embedded` (which tracks what's actually landed in Lance, not cursors)."""
+        return self._state.execute("SELECT key, value FROM state").fetchall()
+
+    def restore_state(self, snap: list[tuple[str, str]]) -> None:
+        """Replace `state`'s contents with `snap` (from an earlier `snapshot_state()`). Only touches
+        `state` — never `embedded`, which must keep reflecting what's really embedded regardless of
+        whether a commit rolled back."""
+        self._state.execute("DELETE FROM state")
+        if snap:
+            self._state.executemany("INSERT INTO state (key, value) VALUES (?, ?)", snap)
