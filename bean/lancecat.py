@@ -27,9 +27,15 @@ def _esc(s: str) -> str:
 class Catalog:
     SCHEMAS = SCHEMAS
 
-    def __init__(self, root: Path):
-        self.root = Path(root); self.root.mkdir(parents=True, exist_ok=True)
-        self.db = lancedb.connect(str(self.root))
+    def __init__(self, root: Path = None, *, remote_uri: str = None, storage_options: dict = None):
+        if (root is None) == (remote_uri is None):
+            raise ValueError("Catalog needs exactly one of root or remote_uri")
+        if remote_uri is not None:
+            self.root = None
+            self.db = lancedb.connect(remote_uri, storage_options=storage_options or {})
+        else:
+            self.root = Path(root); self.root.mkdir(parents=True, exist_ok=True)
+            self.db = lancedb.connect(str(self.root))
 
     def _table(self, name):
         return self.db.open_table(name) if name in self.db.table_names() else None

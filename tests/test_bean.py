@@ -1292,5 +1292,67 @@ ok("--include" in _cmds[1] and "*/_versions/*" in _cmds[1], "pass 2 re-includes 
 ok(_cmds[1].index("--exclude") < _cmds[1].index("--include"),
    "pass 2's --exclude precedes --include, the only ordering that makes the include filter")
 
+# Catalog remote target + commit_with_retry (Task 2.3) -------------------------------------------
+# lancedb.connect accepts a local path just as it does an s3:// URI, so a local dir stands in for
+# "remote" here and exercises the remote_uri constructor branch fully offline.
+_remote_target_dir = Path(tempfile.mkdtemp(prefix="bean-remote-target-"))
+_remote_cat2 = Catalog(remote_uri=str(_remote_target_dir))
+ok(_remote_cat2.root is None, "Catalog(remote_uri=...) leaves root None (no local dir)")
+_remote_cat2.upsert_documents([{"source": "gdocs", "doc_id": "rt1", "title": "T", "url": "u",
+                                 "revision_id": "rev1", "hash": "h1", "body": "remote-target body",
+                                 "created_at": None, "modified_at": None, "author": "Ada",
+                                 "mime": None, "fetched_at": None}])
+ok(_remote_cat2.duck().execute("SELECT body FROM documents WHERE doc_id='rt1'").fetchone()[0]
+   == "remote-target body", "Catalog(remote_uri=...) round-trips an upsert through duck()")
+try:
+    Catalog()
+    ok(False, "Catalog() with neither root nor remote_uri should raise")
+except ValueError:
+    ok(True, "Catalog() with neither root nor remote_uri raises ValueError")
+try:
+    Catalog(_remote_target_dir, remote_uri=str(_remote_target_dir))
+    ok(False, "Catalog(root, remote_uri=...) with both should raise")
+except ValueError:
+    ok(True, "Catalog(root=..., remote_uri=...) with both raises ValueError")
+
+_retry_calls = []
+def _happy():
+    _retry_calls.append(1)
+    return 42
+ok(_remote.commit_with_retry(_happy) == 42, "commit_with_retry returns fn's result on the happy path")
+ok(len(_retry_calls) == 1, "commit_with_retry calls fn exactly once when it succeeds immediately")
+
+_conflict_calls = []
+def _conflict_then_ok():
+    _conflict_calls.append(1)
+    if len(_conflict_calls) < 3:
+        raise RuntimeError("commit conflict: version mismatch")
+    return "resolved"
+ok(_remote.commit_with_retry(_conflict_then_ok) == "resolved",
+   "commit_with_retry retries a conflict-like error and returns the eventual result")
+ok(len(_conflict_calls) == 3, "commit_with_retry called fn 3 times (2 failures + 1 success)")
+
+_nonconflict_calls = []
+def _bad_arg():
+    _nonconflict_calls.append(1)
+    raise ValueError("bad arg")
+try:
+    _remote.commit_with_retry(_bad_arg)
+    ok(False, "commit_with_retry should propagate a non-conflict error")
+except ValueError:
+    ok(True, "commit_with_retry propagates a non-conflict error immediately")
+ok(len(_nonconflict_calls) == 1, "commit_with_retry did not retry a non-conflict error")
+
+_exhaust_calls = []
+def _always_conflict():
+    _exhaust_calls.append(1)
+    raise RuntimeError("concurrent commit retry needed")
+try:
+    _remote.commit_with_retry(_always_conflict, retries=5)
+    ok(False, "commit_with_retry should re-raise after exhausting retries")
+except RuntimeError:
+    ok(True, "commit_with_retry re-raises the last exception after exhausting retries")
+ok(len(_exhaust_calls) == 6, "commit_with_retry made retries+1 total attempts before giving up")
+
 print(f"bean: {CHECKS - FAILED}/{CHECKS} checks passed" if FAILED == 0 else f"bean: {FAILED}/{CHECKS} checks FAILED")
 sys.exit(0 if FAILED == 0 else 1)

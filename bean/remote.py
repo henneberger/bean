@@ -55,6 +55,31 @@ def _copy_new_s3(remote_uri: str, local_dir: Path) -> None:
         subprocess.run(cmd, check=True)
 
 
+_RETRYABLE_MARKERS = ("conflict", "commit", "version", "retry", "concurrent")
+
+
+def _is_retryable(exc: Exception) -> bool:
+    """Heuristic: the spike never triggered a real Lance commit-conflict exception, so there is no
+    confirmed exception type to catch. Retry anything whose type name or message looks
+    conflict-related; let everything else propagate. Replace with the confirmed type once Task 4.2's
+    real-S3 smoke surfaces one."""
+    text = f"{type(exc).__name__} {exc}".lower()
+    return any(marker in text for marker in _RETRYABLE_MARKERS)
+
+
+def commit_with_retry(fn, *, retries: int = 5):
+    """Call `fn()` and return its result. `fn` is expected to re-open its table and re-apply the op
+    each time it's called, so a re-run sees the latest committed version. On an exception that looks
+    like a Lance commit conflict (see `_is_retryable`), retry up to `retries` times; any other
+    exception propagates immediately without retrying."""
+    for attempt in range(retries + 1):
+        try:
+            return fn()
+        except Exception as exc:
+            if not _is_retryable(exc) or attempt == retries:
+                raise
+
+
 def _copy_new_local(remote_dir: Path, local_dir: Path) -> None:
     if not remote_dir.is_dir():
         raise RuntimeError(f"remote.pull: remote dir does not exist: {remote_dir}")
