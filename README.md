@@ -194,12 +194,12 @@ it's slow: Unlimited-OCR is high quality but ~40s/page on CPU.
 
 Everything runs locally on CPU, so the first sync of a big backlog takes real time. Rough numbers on
 a 2024 laptop (Apple M3 Pro, no GPU). The built-in embedder is a compact transformer
-(`jinaai/jina-embeddings-v5-text-nano`), so every chunk is a full forward pass — text is the throughput floor,
-and a large first sync is an hours-not-minutes job:
+(`jinaai/jina-embeddings-v5-text-nano`), so every chunk is a full forward pass — but it's small and
+fast on CPU, so text embedding flies; the slow path is scanned-PDF OCR (below):
 
 | Work | Throughput | So a first sync of… |
 |------|-----------|---------------------|
-| **Text/office docs** (Slack, Docs, wikis, Markdown, `.docx`/`.pptx`/`.xlsx`, comments) | **~4 chunks/sec** (≈14k/hour) | 50,000 docs (~4 chunks each) ≈ **14 hours** |
+| **Text/office docs** (Slack, Docs, wikis, Markdown, `.docx`/`.pptx`/`.xlsx`, comments) | **~40 chunks/sec** (≈140k/hour) | 50,000 docs (~4 chunks each) ≈ **1.5 hours** |
 | **Born-digital PDFs** (embedded text, pymupdf, the default) | **~350 pages/sec** | basically instant; a 300-page PDF ≈ 1 sec |
 | **Scanned PDFs** (`ocr.backend = unlimited-ocr`, opt-in) | **~40 sec/page** (~1.5 pages/min) | 700 scanned pages ≈ **8 hours** |
 
