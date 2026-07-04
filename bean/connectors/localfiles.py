@@ -7,7 +7,6 @@ are pruned from the index."""
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
 
 from ..office import OFFICE_EXT
@@ -19,17 +18,6 @@ TEXT_EXT = {".md", ".markdown", ".mdown", ".mkd", ".mkdn", ".mdx", ".txt", ".tex
 HTML_EXT = {".html", ".htm", ".xhtml"}
 PDF_EXT = {".pdf"}
 SUPPORTED = TEXT_EXT | OFFICE_EXT | PDF_EXT | HTML_EXT
-
-
-def parse_add(item: str):
-    """A path (absolute, ~, ./, or an existing file/dir) → the 'paths' list. Anything else: None."""
-    if item.startswith(("#",)) or "://" in item:
-        return None
-    looks_pathy = item.startswith(("/", "~", "./", "../")) or os.sep in item
-    p = Path(item).expanduser()
-    if p.exists() or looks_pathy:
-        return ("paths", str(p.resolve() if p.exists() else p))
-    return None
 
 
 def _iter_files(paths):

@@ -78,11 +78,22 @@ def check() -> None:
         sys.exit(f"release: version mismatch — pyproject {pv} vs plugin.json {gv} "
                  f"(run `release.py version {pv}`)")
     print(f"release: version in sync at {pv}")
+    _lint()
     print("release: byte-compiling …")
     subprocess.run([_py(), "-m", "compileall", "-q", str(ROOT / "bean")], check=True)
     print("release: running offline test suite …")
     subprocess.run([_py(), str(TESTS)], check=True)
     print("release: ✓ checks passed")
+
+
+def _lint() -> None:
+    """Ruff lint gate (config in pyproject). Skips with a note if ruff isn't installed, so a bare
+    local `make check` still runs; CI installs `.[dev]`, so there it always enforces."""
+    if subprocess.run([_py(), "-c", "import ruff"], capture_output=True).returncode != 0:
+        print("release: ruff not installed — skipping lint (pip install -e '.[dev]' to enable)")
+        return
+    print("release: linting (ruff) …")
+    subprocess.run([_py(), "-m", "ruff", "check", str(ROOT)], check=True)
 
 
 def cmd_check(args) -> int:

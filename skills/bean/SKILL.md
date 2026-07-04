@@ -1,6 +1,6 @@
 ---
 name: bean
-description: Search the user's connected knowledge base — Slack, Google Docs, GitHub, and local files (including PDFs) — with local hybrid (semantic + keyword) retrieval. Use when the user asks a question that their work docs/messages would answer, wants to connect or sync a source, or types /bean. Also for "what's in my docs about X", "what did we decide in #channel", or reconstructing context across their tools.
+description: Search the user's connected knowledge base — Slack, Google Drive, GitHub, Confluence, Jira, Zendesk, Salesforce, HubSpot, Microsoft 365, Discord, and local files (including PDFs) — with local hybrid (semantic + keyword) retrieval. Use when the user asks a question that their work docs/messages would answer, wants to connect or sync a source, or types /bean. Also for "what's in my docs about X", "what did we decide in #channel", or reconstructing context across their tools.
 version: 0.1.0
 user-invocable: true
 argument-hint: init | sync | status | plugins | config | <question>
@@ -9,9 +9,9 @@ allowed-tools: Bash
 
 # bean — local knowledge retrieval
 
-You are driving **bean**, a local hybrid search index over the user's Slack, Google Docs,
-GitHub, and local files. It runs entirely on this machine (their credentials, DuckDB + Lance under
-`~/.bean/<repo>-<hash>/`). **You** run every bean command yourself via Bash — as:
+You are driving **bean**, a local hybrid search index over the user's Slack, Google Drive, GitHub,
+Confluence, Jira and other connected sources (10 connectors) plus local files. It runs entirely on
+this machine (their credentials, DuckDB + Lance under `~/.bean/<repo>-<hash>/`). **You** run every bean command yourself via Bash — as:
 
 ```
 python3 ${CLAUDE_PLUGIN_ROOT}/scripts/bean.py <subcommand> …
@@ -32,7 +32,8 @@ treat their message as the question). Empty or a plain question → the retrieva
 
 bean gives you a **toolbox of retrieval commands**. Don't just run one search — decide what
 context the question needs, then compose calls. Every command prints human-readable text — read its
-output. All accept `--source {slack|gdocs|github|localfiles}` to scope by connector.
+output. All accept `--source <connector>` to scope by connector — one of `slack`, `gdocs`, `github`,
+`confluence`, `jira`, `zendesk`, `salesforce`, `hubspot`, `microsoft`, `discord`, `localfiles`.
 
 **Previews are truncated by default** (5 lines × ~110 chars per hit) so a list stays scannable —
 **don't conclude from a preview alone**. `search`/`recent`/`related` take **`--full [N]`** to print
@@ -97,9 +98,9 @@ Jira, Zendesk, Salesforce, HubSpot, Microsoft 365, Discord — plus local files,
 …) that walks scope (global/local) and every auth option for that source. When setting a source up,
 invoke the matching one rather than improvising the steps.
 
-**Need a source that isn't core?** Author a connector — read
-`${CLAUDE_PLUGIN_ROOT}/docs/authoring-connectors.md`, which walks you through writing an
-offline-tested plugin dropped into `~/.bean/plugins/`. `bean.py plugins list` shows what's loaded.
+**Need a source that isn't core?** Author a connector — copy
+`${CLAUDE_PLUGIN_ROOT}/docs/connector-template.py` (or a bundled connector in `bean/connectors/`)
+into an offline-tested plugin under `~/.bean/plugins/`. `bean.py plugins list` shows what's loaded.
 
 **Scope — ask this for every connector you set up.** A connector is either **global** (indexed once,
 searchable from every repo — e.g. Slack, your personal Google Drive, Gmail) or **local** (scoped to
@@ -168,7 +169,8 @@ list names `bean.py init` prints (e.g. `slack.[channels]`, `github.[repos]`), th
 ## `plugins` — connectors beyond the core 10
 
 - `bean.py plugins list` — the core set plus any drop-in plugin files loaded from `~/.bean/plugins/`.
-- **A source with no bundled connector?** Author one: read
-  `${CLAUDE_PLUGIN_ROOT}/docs/authoring-connectors.md` for the contract, helpers, an offline test
-  recipe, and a template. It produces a self-contained module you drop into `~/.bean/plugins/` —
-  bean loads anything there exposing a `SOURCE`. No core edits.
+- **A source with no bundled connector?** Author one: copy
+  `${CLAUDE_PLUGIN_ROOT}/docs/connector-template.py` — it carries the contract and helper imports
+  inline; the connector tests in `tests/test_bean.py` show the offline fake-fetch test pattern. Fill
+  in the TODOs to get a self-contained module you drop into `~/.bean/plugins/` — bean loads anything
+  there exposing a `SOURCE`. No core edits.

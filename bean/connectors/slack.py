@@ -23,7 +23,9 @@ _LEGACY_WEEK = re.compile(r"/\d{4}-W\d{2}$")  # old per-ISO-week digest ids, pru
 
 
 # -- auth -----------------------------------------------------------------------------------------
-def connect(token: str, *, fetch=None, log=print) -> dict:
+def connect(*, token=None, fetch=None, log=print, **_) -> dict:
+    if not token:
+        raise RuntimeError("pass --token xoxp-… (a Slack user token; see the connect-slack skill).")
     if not token.startswith(("xoxp-", "xoxb-")):
         raise RuntimeError("that does not look like a Slack token (expected xoxp-… or xoxb-…).")
     who = api_json(f"{API}/auth.test", {"Authorization": f"Bearer {token}"}, fetch=fetch)

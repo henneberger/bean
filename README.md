@@ -75,8 +75,8 @@ can set up without an admin: Atlassian Cloud tokens or Server PATs, Microsoft de
 ### More connectors: drop-in plugins
 
 **Need a source bean doesn't have?** Author a connector — a single offline-testable module dropped
-into `~/.bean/plugins/`, live with no core edits. [`docs/authoring-connectors.md`](docs/authoring-connectors.md)
-walks Claude through the contract, helpers, a test recipe, and a template; the 10 core connectors in
+into `~/.bean/plugins/`, live with no core edits. Copy [`docs/connector-template.py`](docs/connector-template.py)
+(contract + helpers inline) to start; the 10 core connectors in
 [`bean/connectors/`](bean/connectors/) are worked examples across every API shape. `bean plugins list` shows what's loaded.
 
 ### Global vs local scope
@@ -211,8 +211,8 @@ first time you enable it.)
 
 ## How it works
 
-- **Sources.** Each connector has a cheap change signal (a revision id, an `updated_at`, a git
-  blob sha, or a file mtime), with the content hash as the final authority. `sync` re-embeds only
+- **Sources.** Each connector has a cheap change signal (a revision id, an `updated_at`, a version
+  number, or a file mtime), with the content hash as the final authority. `sync` re-embeds only
   what changed; deletions revoke their vectors. Sync is resumable: the embed phase
   checkpoints per document (oldest first), so an interrupted run picks up where it left off without
   re-embedding what's done or skipping anything.

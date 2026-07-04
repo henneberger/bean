@@ -48,19 +48,13 @@ def extract_pdf(path, cfg: dict, *, native_text=None, ocr_pages=None, log=lambda
 
 
 def _native_text(path) -> list[str]:
-    """Per-page embedded text via pymupdf, then pypdf, else a clear error."""
+    """Per-page embedded text via pymupdf (a base dependency)."""
     try:
         import fitz  # pymupdf
-        with fitz.open(str(path)) as doc:
-            return [page.get_text("text") for page in doc]
     except ImportError:
-        pass
-    try:
-        from pypdf import PdfReader
-        return [page.extract_text() or "" for page in PdfReader(str(path)).pages]
-    except ImportError:
-        raise RuntimeError(
-            "reading PDFs needs pymupdf (pip install pymupdf) or pypdf; neither is installed")
+        raise RuntimeError("reading PDFs needs pymupdf (pip install pymupdf)")
+    with fitz.open(str(path)) as doc:
+        return [page.get_text("text") for page in doc]
 
 
 # The Unlimited-OCR remote code imports these at load time (checked by transformers before the
@@ -70,18 +64,29 @@ _OCR_PACKAGES = ["torch>=2.1", "transformers>=4.44", "pillow>=10.0", "torchvisio
 _OCR_MODULES = ["torch", "transformers", "torchvision", "addict", "matplotlib", "PIL"]
 
 
-def _provision_ocr(log=lambda m: None) -> None:
+def _provision_ocr(log=lambda m: None, *, allow_install: bool = True) -> None:
     """Ensure the OCR toolchain is importable, installing it into the running venv on first use.
-    bean owns this — the user never runs pip for it, exactly like the embedding model that
-    downloads itself on first use."""
+    bean owns this — the user never runs pip for it, exactly like the embedding model that downloads
+    itself on first use. Set `ocr.auto_install=false` to forbid the runtime pip (e.g. a locked-down
+    or offline venv); then a clear error asks you to pre-install `bean[ocr]` yourself."""
     import importlib.util
     missing = [m for m in _OCR_MODULES if importlib.util.find_spec(m) is None]
     if not missing:
         return
+    if not allow_install:
+        raise RuntimeError(
+            f"OCR needs {', '.join(missing)} but ocr.auto_install is off — "
+            "pre-install it with `pip install 'bean[ocr]'` (torch, transformers, pillow).")
     import subprocess
     import sys
     log(f"pdf: provisioning the OCR toolchain ({', '.join(missing)}) — one time, into this venv…")
-    subprocess.run([sys.executable, "-m", "pip", "install", "--quiet", *_OCR_PACKAGES], check=True)
+    try:
+        subprocess.run([sys.executable, "-m", "pip", "install", "--quiet", *_OCR_PACKAGES],
+                       check=True)
+    except (subprocess.CalledProcessError, OSError) as err:
+        raise RuntimeError(
+            f"OCR toolchain install failed ({err}). Install it yourself with "
+            "`pip install 'bean[ocr]'`, or set ocr.backend='text' to skip OCR.") from err
 
 
 def _ocr_device():
@@ -97,7 +102,7 @@ def _ocr_pages(path, cfg: dict, only: list[int] | None = None, log=lambda m: Non
     """Render pages to images with pymupdf and parse each through the Unlimited-OCR VLM. The
     toolchain is provisioned on first use and the model weights (baidu/Unlimited-OCR) download from
     Hugging Face and are cached. Runs on CUDA, Apple MPS, or CPU — whichever the machine has."""
-    _provision_ocr(log)
+    _provision_ocr(log, allow_install=bool(cfg.get("auto_install", True)))
     import tempfile
 
     import fitz  # pymupdf (base dependency)

@@ -38,20 +38,8 @@ HTML_EXT = {".html", ".htm"}
 PDF_EXT = {".pdf"}
 
 
-# -- refs + auth --------------------------------------------------------------------------------
-def parse_add(item: str):
-    s = item.strip()
-    low = s.lower()
-    if low.startswith("ms:file:"):
-        return ("drives", s.split(":", 2)[2])
-    if low.startswith("ms:mail:"):
-        return ("mail", s.split(":", 2)[2])
-    if low.startswith("ms:teams:"):
-        return ("teams", s.split(":", 2)[2])  # TEAMID/CHANNELID
-    return None
-
-
-def connect(*, method=None, fetch=None, log=print) -> dict:
+# -- auth ---------------------------------------------------------------------------------------
+def connect(*, method=None, fetch=None, log=print, **_) -> dict:
     method = method or "device"
     if method == "az":
         tok = _az_token()  # verifies az is installed + logged in

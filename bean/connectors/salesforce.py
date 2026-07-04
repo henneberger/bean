@@ -20,16 +20,7 @@ CASE_SOQL = ("SELECT Id,CaseNumber,Subject,Description,Status,LastModifiedDate F
              "ORDER BY LastModifiedDate DESC")
 
 
-# -- refs + auth --------------------------------------------------------------------------------
-def parse_add(item: str):
-    item = item.strip().lower()
-    if item == "salesforce:articles":
-        return ("objects", "articles")
-    if item == "salesforce:cases":
-        return ("objects", "cases")
-    return None
-
-
+# -- auth ---------------------------------------------------------------------------------------
 def connect(*, token=None, url=None, fetch=None, log=print, **_ignored) -> dict:
     if not token or not url:
         raise RuntimeError("pass --token <access-token> --url <https://your.my.salesforce.com> "
@@ -76,10 +67,16 @@ def sync(store: Store, config: dict, *, settings: dict, fetch=None, full: bool =
 
     if "articles" in want:
         for rec in _query(instance, ARTICLE_SOQL, headers, fetch):
-            changed += _ingest_article(store, instance, rec, full, log)
+            try:
+                changed += _ingest_article(store, instance, rec, full, log)
+            except Exception as err:  # one bad record must never abort the sync
+                log(f"salesforce: article {rec.get('Id')} skipped ({err})")
     if "cases" in want:
         for rec in _query(instance, CASE_SOQL, headers, fetch):
-            changed += _ingest_case(store, instance, rec, full, log)
+            try:
+                changed += _ingest_case(store, instance, rec, full, log)
+            except Exception as err:
+                log(f"salesforce: case {rec.get('Id')} skipped ({err})")
 
     return {"changed": changed, "removed": []}  # whole-collection source: never prune
 

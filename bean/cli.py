@@ -151,7 +151,7 @@ def cmd_init(ws: Workspace, args) -> int:
         else:
             state = f"→ bean auth {s.auth}" + ("" if s.interactive_auth else f" {s.auth_help}".rstrip())
         print(f"[{mark}] {s.label:<20} {scope:<6} {state}")
-        # Per-source setup detail — the paths + fields the assistant writes to (was `init --json`).
+        # Per-source setup detail — the paths + fields the assistant writes to.
         if s.auth:
             print(f"      credential: {credential_path(s.auth, cred_ws)}"
                   + (f"   fields: {s.auth_help}" if s.auth_help else ""))
@@ -434,7 +434,7 @@ def cmd_config(ws: Workspace, args) -> int:
         if args.path.startswith(("embedding.", "chunking.")) or ".chunking." in args.path:
             print("  (changes the index shape — run `bean sync --rebuild` to apply it to existing docs.)")
         return 0
-    print(f"Unknown config action. Known paths:\n  " + "\n  ".join(cfgmod.known_paths()), file=sys.stderr)
+    print("Unknown config action. Known paths:\n  " + "\n  ".join(cfgmod.known_paths()), file=sys.stderr)
     return 2
 
 
@@ -567,7 +567,10 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--author", help="restrict to docs whose author matches this substring")
     p.add_argument("--since", help="only docs modified on/after this date (YYYY-MM-DD)")
     p.add_argument("--before", help="only docs modified before this date (YYYY-MM-DD)")
-    p.add_argument("--expand", type=int, default=None, help="neighbouring chunks pulled in per hit")
+    p.add_argument("--expand", type=int, default=None,
+                   help="neighbouring chunks pulled in per hit — only applies when section-merge is "
+                        "off (search.merge_sections=false); merged sections already carry their "
+                        "surrounding context")
     p.set_defaults(fn=cmd_search)
 
     p = sub.add_parser("recent", help="most recently changed docs/messages")

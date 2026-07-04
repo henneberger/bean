@@ -195,6 +195,8 @@ def search(ws, query: str, *, queries: list[str] | None = None, k: int | None = 
                 log(f"rerank skipped ({err})")
 
         final = cands[:k]
+        # Neighbour expansion only when sections aren't merged — a merged section already spans the
+        # union of its chunks' line ranges, so pulling neighbours on top would be redundant.
         if expand and not cfg.get("merge_sections"):
             final = _expand(store, final, expand)
     return final

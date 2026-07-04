@@ -19,27 +19,15 @@ NAME = "provider"                                   # TODO: unique connector key
 API = "https://api.provider.com/v1"                 # TODO: base URL
 
 
-# -- refs + auth --------------------------------------------------------------------------------
-def parse_add(item: str):
-    """Claim your refs; return (list_key, value) or None. Be strict — never claim paths/bare words."""
-    s = item.strip()
-    if s.startswith(f"{NAME}:"):
-        val = s.split(":", 1)[1]
-        return ("things", val) if val else None     # TODO: map to your list key
-    # TODO: also recognize your canonical URL, e.g.:
-    # m = re.search(r"provider\.com/thing/(\w+)", s)
-    # if m: return ("things", m.group(1))
-    return None
-
-
+# -- auth ---------------------------------------------------------------------------------------
 def _headers(token: str) -> dict:
     return {"Authorization": f"Bearer {token}"}     # TODO: match the provider's scheme
 
 
 def connect(*, token=None, url=None, email=None, subdomain=None, key=None, secret=None,
-            method=None, fetch=None, log=print) -> dict:
+            method=None, fetch=None, log=print, **_) -> dict:
     if not token:
-        raise RuntimeError(f"pass --token … (create one at https://provider.com/settings/tokens).")
+        raise RuntimeError("pass --token … (create one at https://provider.com/settings/tokens).")
     who = api_json(f"{API}/me", _headers(token), fetch=fetch)   # cheap identity check → verifies token
     save_credential(NAME, {"token": token, "name": who.get("name")})
     log(f"✓ {NAME.title()} connected as {who.get('name')}.")
@@ -89,7 +77,7 @@ def sync(store, config: dict, *, settings, fetch=None, full: bool = False,
 
 # -- registration (the plugin loader reads this) ------------------------------------------------
 SOURCE = Source(
-    NAME, NAME, "Provider", ("things",), sync, parse_add,
+    NAME, NAME, "Provider", ("things",), sync,
     auth=NAME,                                       # None if the source needs no credential
     add_help=f"{NAME}:THING or a provider.com/thing/… URL",
     auth_help="--token <api-token>",

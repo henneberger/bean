@@ -8,7 +8,6 @@ issues."""
 from __future__ import annotations
 
 import base64
-import re
 from urllib.parse import urlencode
 
 from ..http import api_json
@@ -18,7 +17,7 @@ from ..workspace import load_credential, save_credential
 CRED = "jira"
 
 
-# -- refs + auth --------------------------------------------------------------------------------
+# -- auth ---------------------------------------------------------------------------------------
 def _atlassian_auth(cred: dict) -> dict:
     if cred.get("method") == "cloud":
         raw = f"{cred.get('email', '')}:{cred['token']}".encode("utf-8")
@@ -27,20 +26,8 @@ def _atlassian_auth(cred: dict) -> dict:
     return {"Authorization": f"Bearer {cred['token']}", "Accept": "application/json"}
 
 
-def parse_add(item: str):
-    s = item.strip()
-    if s.startswith("jira:"):
-        key = s.split(":", 1)[1]
-        return ("projects", key) if key else None
-    if "atlassian.net" in s or "/browse/" in s:
-        m = re.search(r"/browse/([A-Za-z][A-Za-z0-9_]*)-\d+", s)
-        if m:
-            return ("projects", m.group(1))
-    return None
-
-
 def connect(*, token=None, url=None, email=None, key=None, secret=None, method=None,
-            fetch=None, log=print) -> dict:
+            fetch=None, log=print, **_) -> dict:
     if not token or not url:
         raise RuntimeError(
             "pass --url https://your.atlassian.net --token <token> (Cloud also needs --email; "
@@ -90,8 +77,11 @@ def sync(store: Store, config: dict, *, settings: dict, fetch=None, full: bool =
             issues = resp.get("issues", [])
             for issue in issues:
                 doc_id = issue.get("key")
-                if _ingest(store, base, issue, log):
-                    changed.append(doc_id)
+                try:
+                    if _ingest(store, base, issue, log):
+                        changed.append(doc_id)
+                except Exception as err:  # one bad issue must never abort the project sync
+                    log(f"jira: {doc_id} skipped ({err})")
                 upd = (issue.get("fields") or {}).get("updated") or ""
                 newest = max(newest or "", upd)
             total = resp.get("total", 0)

@@ -9,8 +9,8 @@ changes are Python in `bean/` plus its offline test suite. By taking part you ag
 The fastest wins:
 
 - **Add a connector.** bean has no connector for your source? Write one — a single module dropped
-  into `~/.bean/plugins/`, no core edits. [`docs/authoring-connectors.md`](docs/authoring-connectors.md)
-  is the full guide (contract, helpers, a test recipe, and a template). The 10 built-in connectors in
+  into `~/.bean/plugins/`, no core edits. Copy [`docs/connector-template.py`](docs/connector-template.py)
+  (contract + helpers inline) as a starting point. The 10 built-in connectors in
   [`bean/connectors/`](bean/connectors/) are worked examples across every API shape.
 - **Fix a bug or a doc.** Small, focused PRs are the easiest to review.
 - **Improve retrieval or a connector's coverage.** Open an issue first if it changes behaviour.
@@ -41,7 +41,7 @@ python3 scripts/bean.py status
 2. Make the change with tests. The suite is one file, `tests/test_bean.py`; add a check next to the
    ones for the area you touched. New behaviour without a test won't merge.
 3. Run `make check` — it must pass (green tests, version in sync, clean compile).
-4. Update the docs you affected: `README.md`, `docs/authoring-connectors.md`, or a
+4. Update the docs you affected: `README.md`, `docs/connector-template.py`, or a
    `skills/connect-<source>/` setup skill.
 5. Open a PR describing the what and the why, and link any related issue.
 

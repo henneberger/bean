@@ -21,18 +21,8 @@ DAY = 86400
 KINDS = ("tickets", "articles")
 
 
-# -- refs + auth --------------------------------------------------------------------------------
-def parse_add(item: str):
-    """`zendesk:tickets` / `zendesk:articles` restrict which kinds sync (default: both)."""
-    s = item.strip().lower()
-    if s in ("zendesk:tickets", "zendesk:ticket"):
-        return ("include", "tickets")
-    if s in ("zendesk:articles", "zendesk:article"):
-        return ("include", "articles")
-    return None
-
-
-def connect(*, subdomain=None, url=None, email=None, token=None, fetch=None, log=print) -> dict:
+# -- auth ---------------------------------------------------------------------------------------
+def connect(*, subdomain=None, url=None, email=None, token=None, fetch=None, log=print, **_) -> dict:
     if url and not subdomain:  # accept a full https://acme.zendesk.com URL too
         subdomain = url.split("//", 1)[-1].split(".", 1)[0]
     if not (subdomain and email and token):

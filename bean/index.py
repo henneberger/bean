@@ -1,9 +1,10 @@
 """Lance vector store for a workspace. One `chunks` table; rows carry enough metadata
 (title, url, text) that a search result needs no second lookup.
 
-lancedb is the only Lance dependency: it owns table create/add/delete + vector search, and its
-`table.to_lance()` hands DuckDB the very same dataset for the keyword / neighbour / merge SQL (see
-`store.py`) — so there is one copy of the chunk data and no separate `pylance` pin to keep in step."""
+lancedb owns table create/add/delete + vector search, and its `table.to_lance()` hands DuckDB the
+very same dataset for the keyword / neighbour / merge SQL (see `store.py`) — so there is one copy of
+the chunk data. `to_lance()` returns a `lance.LanceDataset`, so `pylance` (the `lance` module) is a
+direct dependency in its own right, pinned alongside lancedb in pyproject."""
 
 from __future__ import annotations
 

@@ -36,4 +36,5 @@ release:
 	$(PY) dev/release.py cut $(VERSION) $(if $(YES),--yes,)
 
 clean:
-	rm -rf dist build *.egg-info bean/__pycache__ bean/prototypes/__pycache__
+	rm -rf dist build *.egg-info
+	find . -type d -name __pycache__ -prune -exec rm -rf {} +

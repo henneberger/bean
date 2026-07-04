@@ -7,7 +7,6 @@ revision id, so unchanged pages re-embed nothing. Removing a space from config p
 from __future__ import annotations
 
 import base64
-import re
 from urllib.parse import urlencode
 
 from ..http import api_json
@@ -18,7 +17,7 @@ from ..html import html_to_text
 CRED = "confluence"
 
 
-# -- refs + auth --------------------------------------------------------------------------------
+# -- auth ---------------------------------------------------------------------------------------
 def _headers(cred: dict) -> dict:
     if cred.get("method") == "cloud":
         raw = f"{cred.get('email', '')}:{cred['token']}".encode("utf-8")
@@ -27,26 +26,8 @@ def _headers(cred: dict) -> dict:
     return {"Authorization": f"Bearer {cred['token']}", "Accept": "application/json"}
 
 
-def parse_add(item: str):
-    s = item.strip()
-    if s.startswith("confluence:page:"):
-        pid = s.split(":", 2)[2]
-        return ("pages", pid) if pid else None
-    if s.startswith("confluence:"):
-        key = s.split(":", 1)[1]
-        return ("spaces", key) if key else None
-    if "atlassian.net/wiki" in s or "/pages/" in s or "/spaces/" in s:
-        m = re.search(r"/pages/(\d+)", s)
-        if m:
-            return ("pages", m.group(1))
-        m = re.search(r"/spaces/([^/?#]+)", s)
-        if m:
-            return ("spaces", m.group(1))
-    return None
-
-
 def connect(*, token=None, url=None, email=None, key=None, secret=None, method=None,
-            fetch=None, log=print) -> dict:
+            fetch=None, log=print, **_) -> dict:
     if not token or not url:
         raise RuntimeError(
             "pass --url https://your.atlassian.net/wiki --token <token> (Cloud also needs "
@@ -85,14 +66,20 @@ def sync(store: Store, config: dict, *, settings: dict, fetch=None, full: bool =
 
     changed, seen = [], []
 
-    def ingest(page: dict):
+    def ingest(page: dict, *, body_html: str | None = None):
         pid = str(page.get("id"))
         seen.append(pid)
         rev = str(((page.get("version") or {}).get("number", "")))
         existing = store.get(CRED, pid)
         if not full and existing and existing.revision_id == rev:
-            return
-        html = (((page.get("body") or {}).get("storage") or {}).get("value")) or ""
+            return  # version unchanged — never pull the (expensive) storage HTML
+        # Fetch the full storage body only for a page we're actually going to (re)embed. The space
+        # listing carries version/metadata but not the body, so unchanged pages cost one cheap list
+        # entry instead of a full-HTML round-trip every sync.
+        html = body_html
+        if html is None:
+            got = api_json(f"{base}/rest/api/content/{pid}?expand=body.storage", headers, fetch=fetch)
+            html = (((got.get("body") or {}).get("storage") or {}).get("value")) or ""
         title = page.get("title") or "Untitled"
         body = f"# {title}\n\n" + html_to_text(html)
         webui = ((page.get("_links") or {}).get("webui")) or ""
@@ -105,16 +92,21 @@ def sync(store: Store, config: dict, *, settings: dict, fetch=None, full: bool =
             changed.append(pid)
             log(f"confluence: updated \"{title}\"")
 
-    expand = "body.storage,version,history.lastUpdated"
+    # List pages with metadata only (no body.storage) so unchanged pages are cheap; ingest() pulls
+    # the body lazily for the few that changed. The full listing keeps prune-by-seen correct.
+    list_expand = "version,history.lastUpdated"
     for key in spaces:
         start = 0
         while True:
-            q = urlencode({"spaceKey": key, "type": "page", "expand": expand,
+            q = urlencode({"spaceKey": key, "type": "page", "expand": list_expand,
                            "limit": 100, "start": start})
             resp = api_json(f"{base}/rest/api/content?{q}", headers, fetch=fetch)
             results = resp.get("results", [])
             for page in results:
-                ingest(page)
+                try:
+                    ingest(page)
+                except Exception as err:  # one bad page must never abort the space sync
+                    log(f"confluence: {page.get('id')} skipped ({err})")
             size = resp.get("size", len(results))
             if len(results) < 100 or not results:
                 break
@@ -122,11 +114,13 @@ def sync(store: Store, config: dict, *, settings: dict, fetch=None, full: bool =
 
     for pid in single:
         try:
-            page = api_json(f"{base}/rest/api/content/{pid}?expand={expand}", headers, fetch=fetch)
-        except RuntimeError as err:
+            page = api_json(f"{base}/rest/api/content/{pid}?expand=body.storage,version,"
+                            "history.lastUpdated", headers, fetch=fetch)
+            html = (((page.get("body") or {}).get("storage") or {}).get("value")) or ""
+            ingest(page, body_html=html)
+        except Exception as err:  # a missing/bad page must never abort the rest
             log(f"confluence: {pid} skipped ({err})")
             continue
-        ingest(page)
 
     removed = [d for d in store.doc_ids(CRED) if d not in seen]
     for pid in removed:

@@ -8,7 +8,6 @@ through the shared PDF extractor (`bean/pdf.py`, same OCR backend as local files
 from __future__ import annotations
 
 import os
-import re
 import shutil
 import subprocess
 import tempfile
@@ -34,20 +33,6 @@ DOC_FIELDS = ("id,name,createdTime,modifiedTime,headRevisionId,webViewLink,trash
 COMMENT_FIELDS = ("comments(id,resolved,createdTime,modifiedTime,content,"
                   "author(displayName,emailAddress),quotedFileContent(value),"
                   "replies(createdTime,content,author(displayName,emailAddress)))")
-
-
-# -- refs ---------------------------------------------------------------------------------------
-def parse_ref(s: str) -> tuple[str, str] | None:
-    """('doc'|'folder', id) from a URL or bare id; None when it isn't a Google ref."""
-    m = re.search(r"docs\.google\.com/document/d/([\w-]+)", s)
-    if m:
-        return ("doc", m.group(1))
-    m = re.search(r"drive\.google\.com/(?:[^\s]*/)?folders/([\w-]+)", s)
-    if m:
-        return ("folder", m.group(1))
-    if re.fullmatch(r"[\w-]{20,}", s):
-        return ("doc", s)
-    return None
 
 
 # -- gcloud auth ----------------------------------------------------------------------------------

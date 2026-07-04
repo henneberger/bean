@@ -7,7 +7,6 @@ end-to-end sync→search flow, and workspace/credential hygiene."""
 from __future__ import annotations
 
 import json
-import os
 import re
 import stat
 import sys
@@ -29,7 +28,6 @@ from bean.connectors import gdocs, slack, localfiles, github  # noqa: E402
 from bean.index import search as lance_search  # noqa: E402
 from bean.sync import run_sync  # noqa: E402
 from bean.search import search as hybrid_search, recent, thread, neighbors  # noqa: E402
-from bean.sources import route_add  # noqa: E402
 
 CHECKS = FAILED = 0
 
@@ -135,10 +133,6 @@ ok(len(chunks) > 1 and chunks[0].id == "gdocs/d1#L1", "chunking yields stable id
 ok(all(len(c.text) <= 2000 for c in chunks), "chunks capped")
 
 # -- gdocs sync ---------------------------------------------------------------------------------
-ok(gdocs.parse_ref("https://docs.google.com/document/d/aBc-123_x/edit") == ("doc", "aBc-123_x"), "doc url parses")
-ok(gdocs.parse_ref("https://drive.google.com/drive/u/0/folders/F0LDER123") == ("folder", "F0LDER123"), "folder url parses")
-ok(gdocs.parse_ref("nope") is None, "garbage rejected")
-
 DOCS = {
     "docA": {"name": "Payments Guide", "rev": "r1", "body": "# Payments\n\nBilling goes through chargeCard and emits a receipt.", "md": True},
     "docB": {"name": "Legacy Notes", "rev": "r9", "body": "Plain only.", "md": False},
@@ -473,13 +467,6 @@ ok(_lookback("discord", {"lookback_days": 5}, {"discord": {"lookback_days": 3}})
 ok("github" not in LOOKBACK_DEFAULTS and "notion" not in LOOKBACK_DEFAULTS,
    "sources without a window carry no lookback")
 
-# -- source routing -----------------------------------------------------------------------------
-ok(route_add("#eng")[0].key == "slack", "#channel routes to slack")
-ok(route_add("https://docs.google.com/document/d/abcdefghij1234567890/edit")[0].key == "gdocs", "gdoc url → gdocs")
-ok(route_add("baidu/Unlimited-OCR")[0].key == "github" and route_add("baidu/Unlimited-OCR")[2] == "baidu/Unlimited-OCR", "owner/repo → github")
-ok(route_add("/tmp/some/notes")[0].key == "localfiles", "path → localfiles")
-ok(route_add("garbage no ref") is None or route_add("garbage no ref")[0].key == "localfiles", "bare words don't crash routing")
-
 # -- local files connector (incl. mtime skip + prune) -------------------------------------------
 docs_dir = Path(tempfile.mkdtemp(prefix="bean-docs-"))
 (docs_dir / "guide.md").write_text("# Refunds\n\nRefunds go through refundCard and reverse the receipt.\n")
@@ -753,7 +740,8 @@ cfgmod.save_global({})
 from bean.workspace import save_scopes, set_source_scope, source_scope  # noqa: E402
 from bean.search import search_many  # noqa: E402
 from bean.sync import run_sync as _run_sync  # noqa: E402
-import io as _io, contextlib as _ctx  # noqa: E402
+import io as _io  # noqa: E402
+import contextlib as _ctx  # noqa: E402
 
 save_scopes({})
 ok(source_scope("slack") == "local", "default connector scope is local")
@@ -870,20 +858,25 @@ def _store(tag):
 def t_confluence():
     save_credential("confluence", {"method": "cloud", "url": "https://x.atlassian.net/wiki",
                                    "email": "e", "token": "t"})
+    body_fetches = []
     def f(u, h, method="GET", body=None):
-        if "spaceKey" in u:
+        if "spaceKey" in u:  # cheap listing: metadata only, no body.storage
             return res(200, {"results": [{"id": "123", "title": "Runbook",
-                "body": {"storage": {"value": "<p>Restart the worker.</p>"}},
                 "version": {"number": 2, "by": {"displayName": "Ada"}},
                 "history": {"lastUpdated": {"when": "2026-01-02T00:00:00Z"}},
                 "_links": {"webui": "/pages/123"}}], "size": 1})
+        if "/content/123" in u:  # lazy body fetch — only for a changed page
+            body_fetches.append(u)
+            return res(200, {"body": {"storage": {"value": "<p>Restart the worker.</p>"}}})
         return res(200, {})
     with _store("confluence") as s:
         r = confluence.sync(s, {"spaces": ["ENG"], "pages": []}, settings={}, fetch=f)
         ok(r["changed"] == ["123"], f"confluence page ingested ({r})")
         ok("Restart the worker." in s.get("confluence", "123").body, "confluence storage HTML flattened")
+        ok(len(body_fetches) == 1, "confluence pulled the body once for the changed page")
         r2 = confluence.sync(s, {"spaces": ["ENG"], "pages": []}, settings={}, fetch=f)
         ok(r2["changed"] == [], "confluence unchanged version is a no-op")
+        ok(len(body_fetches) == 1, "confluence skips the body fetch when the version is unchanged")
 
 
 def t_jira():
@@ -1010,8 +1003,6 @@ ok(_S.SOURCES[-1].key == "localfiles", "localfiles registered last (path catch-a
 plugdir = Path(tempfile.mkdtemp(prefix="bean-plugins-"))
 (plugdir / "acme.py").write_text(
     "from bean.sources import Source\n"
-    "def parse_add(item):\n"
-    "    return ('boards', item.split(':',1)[1]) if item.startswith('acme:') else None\n"
     "def sync(store, config, *, settings, fetch=None, full=False, since_days=90, log=lambda m: None):\n"
     "    changed = []\n"
     "    for b in config.get('boards', []):\n"
@@ -1021,7 +1012,7 @@ plugdir = Path(tempfile.mkdtemp(prefix="bean-plugins-"))
     "    return {'changed': changed, 'removed': []}\n"
     "def connected():\n"
     "    return {'ok': True}\n"
-    "SOURCE = Source('acme', 'acme', 'Acme', ('boards',), sync, parse_add, auth=None,\n"
+    "SOURCE = Source('acme', 'acme', 'Acme', ('boards',), sync, auth=None,\n"
     "                add_help='acme:BOARD', connected=connected)\n"
 )
 found = discover_sources(_S.Source, global_config={}, dirs=[plugdir])
@@ -1029,7 +1020,8 @@ ok(len(found) == 1 and found[0].key == "acme", "drop-in plugin discovered from a
 
 _cfg.save_global({"plugins": {"paths": [str(plugdir)]}})
 _S.reload_sources()
-ok(_S.route_add("acme:main") and _S.route_add("acme:main")[0].key == "acme", "drop-in plugin routes")
+ok("acme" in _S.BY_KEY and _S.SOURCES[-1].key == "localfiles",
+   "drop-in plugin registers ahead of the localfiles catch-all")
 acme_src = _S.BY_KEY["acme"]
 with _store("acme-plugin") as s:
     r = acme_src.sync(s, {"boards": ["main"]}, settings={}, fetch=None)
@@ -1069,6 +1061,91 @@ with redirect_stdout(_ebuf):
     _erc = _print_hits(None, [], "nothing here", full=0)
 ok(_erc == 1 and "nothing here" in _ebuf.getvalue(),
    "empty hits still print the empty message under --full")
+
+# --- http POST / JSON helpers + error-detail extraction -----------------------------------------
+from bean.http import api_post, api_json, api_json_post  # noqa: E402
+
+_seen = {}
+def _echo(u, h, method="GET", body=None):
+    _seen["method"], _seen["body"] = method, body
+    return res(200, {"ok": True})
+ok(api_post("https://x/y", {}, {"a": 1}, fetch=_echo).json() == {"ok": True}, "api_post returns the response")
+ok(_seen["method"] == "POST" and _seen["body"] == {"a": 1}, "api_post threads method + JSON body through the seam")
+ok(api_json_post("https://x/y", {}, {"a": 1}, fetch=_echo) == {"ok": True}, "api_json_post unwraps the JSON body")
+ok(api_json("https://x/y", {}, fetch=lambda u, h: res(200, {"v": 9}))["v"] == 9, "api_json unwraps a GET body")
+try:
+    api_json("https://x/y", {}, fetch=lambda u, h: res(500, {"error": {"message": "boom detail"}}))
+    ok(False, "api_json should raise on a non-2xx")
+except RuntimeError as err:
+    ok("boom detail" in str(err), "_detail surfaces a nested error.message")
+try:
+    api_json("https://x/y", {}, fetch=lambda u, h: res(422, {"errors": ["first bad thing"]}))
+    ok(False, "api_json should raise on 422")
+except RuntimeError as err:
+    ok("first bad thing" in str(err), "_detail extracts the first item of an errors list")
+
+# --- content_hash is deterministic and content-sensitive ----------------------------------------
+ok(content_hash("same text") == content_hash("same text"), "content_hash is deterministic")
+ok(content_hash("a") != content_hash("b"), "content_hash distinguishes different bodies")
+
+# --- github connector: sync + per-item tolerance (one bad issue never aborts the repo) ----------
+def t_github():
+    save_credential("github", {"token": "ghp_x", "login": "me"})
+    def f(u, h, method="GET", body=None):
+        if "/issues?" in u:  # the repo issue listing
+            return res(200, [
+                {"number": 1, "title": "Good", "state": "open", "user": {"login": "ada"},
+                 "body": "a real issue body", "updated_at": "2026-01-01T00:00:00Z", "comments": 0,
+                 "html_url": "https://github.com/acme/repo/issues/1",
+                 "created_at": "2026-01-01T00:00:00Z"},
+                {"title": "malformed — no number"},  # _ingest_issue raises (KeyError on number)
+            ])
+        return res(200, [])
+    with _store("github") as s:
+        r = github.sync(s, {"repos": ["acme/repo"], "include": ["issues"]}, settings={}, fetch=f)
+        ok(r["changed"] == ["acme/repo#1"], f"github ingests the good issue ({r})")
+        ok(s.get("github", "acme/repo#1") is not None,
+           "the good issue survived a malformed sibling in the same batch")
+check("github", t_github)
+
+# --- neighbors primitive + scope-union wrappers (single ws behaves like the primitives) ---------
+from bean.search import recent_many, neighbors_many, document_many  # noqa: E402
+
+with Store(mws) as _s:
+    _allch = _s.neighbors("gdocs", "big", 0, 999)
+_cid = _allch[len(_allch) // 2]["id"]
+_nb = neighbors(mws, _cid, radius=1)
+ok(_nb and all(h["doc_id"] == "big" for h in _nb), "neighbors() returns chunks around a chunk id")
+ok(neighbors(mws, "no-such-chunk") == [], "neighbors() is empty for an unknown chunk id")
+ok([h["doc_id"] for h in recent_many(mws, limit=5)] == [h["doc_id"] for h in recent(mws, limit=5)],
+   "recent_many over a single ws matches recent()")
+ok(bool(neighbors_many(mws, _cid, radius=1)), "neighbors_many returns the first ws that has the chunk")
+_dm = document_many(mws, "big")
+ok(_dm and _dm[0]["doc_id"] == "big", "document_many finds the doc by id substring")
+_rel = _related(gws2, "acme/repo#1")
+ok(_rel and any(h["doc_id"] == "acme/repo#2" for h in _rel), "search.related() expands one hop over the graph")
+
+# --- cmd_sql read-only guard --------------------------------------------------------------------
+from bean.cli import cmd_sql  # noqa: E402
+import types as _types  # noqa: E402
+
+_sqlws = Workspace(repo("sqlguard"))
+with Store(_sqlws) as _s:
+    _s.upsert("gdocs", "d", title="T", url=None, revision_id=None, body="hello sql world")
+
+def _sql(*words):
+    return _types.SimpleNamespace(query=list(words), global_=False)
+
+with _ctx.redirect_stderr(_io.StringIO()):
+    ok(cmd_sql(_sqlws, _sql("DROP", "TABLE", "documents")) == 2, "cmd_sql refuses a non-SELECT (read-only guard)")
+    ok(cmd_sql(_sqlws, _sql("DELETE", "FROM", "documents")) == 2, "cmd_sql refuses DELETE")
+_okbuf = _io.StringIO()
+with _ctx.redirect_stdout(_okbuf):
+    _rc = cmd_sql(_sqlws, _sql("SELECT", "count(*)", "FROM", "documents"))
+ok(_rc == 0 and "1" in _okbuf.getvalue(), "cmd_sql runs a SELECT and prints the result")
+with _ctx.redirect_stdout(_io.StringIO()):
+    ok(cmd_sql(_sqlws, _sql("WITH", "x", "AS", "(SELECT", "1", "AS", "n)", "SELECT", "*", "FROM", "x")) == 0,
+       "cmd_sql allows a WITH … SELECT CTE")
 
 print(f"bean: {CHECKS - FAILED}/{CHECKS} checks passed" if FAILED == 0 else f"bean: {FAILED}/{CHECKS} checks FAILED")
 sys.exit(0 if FAILED == 0 else 1)

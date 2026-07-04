@@ -163,7 +163,7 @@ def _credential_search_dirs() -> list[Path]:
 
 def credential_path(name: str, ws=None) -> Path:
     """Where `name`'s credential lives given the scope: the workspace dir for a local ws, else the
-    shared dir. Used by `bean init --json` so the assistant writes the file to the right place."""
+    shared dir. `bean init` prints this so the assistant writes the credential to the right place."""
     w = ws if ws is not None else _cred_ws.get()
     base = w.dir if _is_local_ws(w) else bean_home()
     return base / "credentials" / f"{name}.json"

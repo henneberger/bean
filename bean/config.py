@@ -88,6 +88,10 @@ DEFAULTS: dict = {
         "backend": "auto",
         "model": "baidu/Unlimited-OCR",
         "dpi": 200,
+        # On first OCR, bean installs the heavy toolchain (torch, transformers, pillow) into its own
+        # venv — like the embedding model, you never pip it by hand. false = forbid that runtime pip
+        # (locked-down/offline venvs); then OCR errors and asks you to pre-install `bean[ocr]`.
+        "auto_install": True,
     },
     "sync": {
         # Warn (never auto-run) when the index hasn't been synced in this many days, so an assistant

@@ -5,7 +5,7 @@ connectors (but before `localfiles`, which stays the path catch-all): every `*.p
 dir (default `~/.bean/plugins/`, plus any paths in `plugins.paths`). A plugin module exposes ONE
 of: a `SOURCE` (a Source), a `SOURCES` list, or a `register() -> Source | list[Source]`. It builds
 those with `from bean.sources import Source` and calls the same `bean.http`/`bean.store` helpers the
-bundled connectors do. See `docs/authoring-connectors.md` for the authoring guide + template.
+bundled connectors do. Copy `docs/connector-template.py` (or a bundled connector) as a starting point.
 
 A broken plugin file is logged and skipped — it never takes down the registry."""
 

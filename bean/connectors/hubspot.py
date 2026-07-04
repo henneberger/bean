@@ -19,19 +19,7 @@ KINDS = ("tickets", "notes", "kb")
 PAGE = 100
 
 
-# -- refs + auth --------------------------------------------------------------------------------
-def parse_add(item: str):
-    """`hubspot:tickets` / `hubspot:notes` / `hubspot:kb` restrict which kinds sync (default: all)."""
-    s = item.strip().lower()
-    if s in ("hubspot:tickets", "hubspot:ticket"):
-        return ("include", "tickets")
-    if s in ("hubspot:notes", "hubspot:note"):
-        return ("include", "notes")
-    if s in ("hubspot:kb", "hubspot:articles", "hubspot:knowledge"):
-        return ("include", "kb")
-    return None
-
-
+# -- auth ---------------------------------------------------------------------------------------
 def connect(*, token=None, key=None, fetch=None, log=print, **_) -> dict:
     token = token or key
     if not token:

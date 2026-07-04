@@ -134,24 +134,6 @@ class Store:
         self.con.execute("DELETE FROM edges WHERE source=? AND src_doc=?", [source, doc_id])
         # Chunk vectors live in Lance; index.delete_doc removes them (called by the sync/scope paths).
 
-    def modified_map(self, pairs) -> dict:
-        """{(source, doc_id): modified_at} for a set of hits — the recency signal, one query."""
-        rows = list(dict.fromkeys((s, d) for s, d in pairs))
-        if not rows:
-            return {}
-        out: dict = {}
-        # DuckDB has no easy tuple-IN; group by source and filter doc_ids per source.
-        by_src: dict = {}
-        for s, d in rows:
-            by_src.setdefault(s, []).append(d)
-        for s, ids in by_src.items():
-            ph = ",".join("?" * len(ids))
-            for did, mod in self.con.execute(
-                    f"SELECT doc_id, modified_at FROM documents WHERE source=? AND doc_id IN ({ph})",
-                    [s, *ids]).fetchall():
-                out[(s, did)] = mod
-        return out
-
     def doc_ids(self, source: str) -> list[str]:
         return [r[0] for r in self.con.execute(
             "SELECT doc_id FROM documents WHERE source=? ORDER BY doc_id", [source]).fetchall()]
@@ -250,11 +232,9 @@ class Store:
         if before:
             where.append("COALESCE(modified_at, fetched_at) < ?"); params.append(before)
 
-    def recent(self, *, source: str | None = None, doc_like: str | None = None,
-               author: str | None = None, since=None, before=None, limit: int = 20) -> list[dict]:
-        """Most-recently-*modified* documents (by the doc's own timestamp, falling back to when
-        bean fetched it when a source has none), newest first — 'what changed lately'. Optional
-        author / since / before narrow to who and when."""
+    def _find_docs(self, *, source, doc_like, author, since, before, limit, tiebreak: str):
+        """Documents ordered newest-first by their own timestamp (fetch time when a source has none),
+        with the given filters. `tiebreak` is appended to the ORDER BY for a stable secondary sort."""
         where, params = ["1=1"], []
         if source:
             where.append("source = ?"); params.append(source)
@@ -264,23 +244,21 @@ class Store:
         return self._rows(
             "SELECT source, doc_id, title, url, body, created_at, modified_at, author, mime, "
             "fetched_at FROM documents "
-            f"WHERE {' AND '.join(where)} "
-            "ORDER BY COALESCE(modified_at, fetched_at) DESC, doc_id DESC LIMIT ?",
-            params + [limit])
+            f"WHERE {' AND '.join(where)} ORDER BY COALESCE(modified_at, fetched_at) DESC{tiebreak} "
+            "LIMIT ?", params + [limit])
+
+    def recent(self, *, source: str | None = None, doc_like: str | None = None,
+               author: str | None = None, since=None, before=None, limit: int = 20) -> list[dict]:
+        """Most-recently-*modified* documents (by the doc's own timestamp, falling back to when
+        bean fetched it when a source has none), newest first — 'what changed lately'. Optional
+        author / since / before narrow to who and when."""
+        return self._find_docs(source=source, doc_like=doc_like, author=author, since=since,
+                               before=before, limit=limit, tiebreak=", doc_id DESC")
 
     def find_docs(self, *, source: str | None = None, doc_like: str | None = None,
                   author: str | None = None, since=None, before=None, limit: int = 20) -> list[dict]:
-        where, params = ["1=1"], []
-        if source:
-            where.append("source = ?"); params.append(source)
-        if doc_like:
-            where.append("(doc_id ILIKE ? OR title ILIKE ?)"); params += [f"%{doc_like}%", f"%{doc_like}%"]
-        self._meta_filters(where, params, author, since, before)
-        return self._rows(
-            "SELECT source, doc_id, title, url, body, created_at, modified_at, author, mime, "
-            "fetched_at FROM documents "
-            f"WHERE {' AND '.join(where)} ORDER BY COALESCE(modified_at, fetched_at) DESC LIMIT ?",
-            params + [limit])
+        return self._find_docs(source=source, doc_like=doc_like, author=author, since=since,
+                               before=before, limit=limit, tiebreak="")
 
     def doc_meta_map(self, pairs) -> dict:
         """{(source, doc_id): {"author", "modified_at"}} for filtering fused search hits."""

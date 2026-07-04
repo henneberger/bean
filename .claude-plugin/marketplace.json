@@ -1,6 +1,6 @@
 {
   "name": "bean",
-  "description": "Local hybrid search over your Slack, Google Docs, GitHub, and local files — no server, your credentials, your machine.",
+  "description": "Local hybrid search over your Slack, Google Drive, GitHub, Confluence, Jira, and 5 more connectors plus local files — no server, your credentials, your machine.",
   "owner": { "name": "Daniel Henneberger" },
   "plugins": [
     {

@@ -15,19 +15,22 @@ dependencies = [
     "sentence-transformers>=3.0",  # the built-in embedder: jinaai/jina-embeddings-v5-text-nano (pulls torch)
     "peft>=0.11",  # jina-embeddings-v5's custom model code loads its task LoRA adapters via peft
     "huggingface-hub>=0.24",  # model downloads for sentence-transformers
-    "fastembed>=0.3",  # only the optional local cross-encoder reranker (bean/rerank.py)
     "pymupdf>=1.24",   # PDF: born-digital text + page rasterisation for the OCR backend
     "python-pptx>=0.6",  # local .pptx text extraction
     "openpyxl>=3.1",     # local .xlsx text extraction
 ]
 
 [project.optional-dependencies]
+# Optional local cross-encoder reranker (bean/rerank.py), off by default (search.rerank.enabled).
+# fastembed pulls onnxruntime, so it stays out of the core install — enable it only if you turn the
+# reranker on. rerank.py raises an actionable error pointing here when it's missing.
+rerank = ["fastembed>=0.3"]
 # OCR toolchain for scanned PDFs (baidu/Unlimited-OCR). You don't need to install this yourself —
 # bean provisions it into its venv the first time ocr.backend = "unlimited-ocr" actually runs
-# (see bean/pdf.py:_provision_ocr). This extra just lets you pre-install it if you'd rather.
+# (see bean/pdf.py:_provision_ocr), unless ocr.auto_install is off. This extra pre-installs it.
 ocr = ["transformers>=4.44", "torch>=2.1", "pillow>=10.0"]
-# Release tooling (building the wheel/sdist). `make build` / `dev/release.py build` use it.
-dev = ["build>=1.0"]
+# Release tooling: building the wheel/sdist and the lint gate. `make check`/`make build` use these.
+dev = ["build>=1.0", "ruff>=0.6"]
 
 [project.scripts]
 bean = "bean.cli:main"
@@ -38,3 +41,14 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["bean"]
+
+[tool.ruff]
+line-length = 110
+
+[tool.ruff.lint]
+# Enforce the bug-catching subset — pyflakes (unused imports/vars, undefined names, bad f-strings),
+# import placement, and real logic smells (bare except, == None). bean's dense idiom (semicolon-
+# joined statements, long lines, deliberate late imports guarded with noqa) is intentional, so those
+# pure-style pycodestyle rules stay off.
+select = ["F", "E4", "E7", "E9", "W6"]
+ignore = ["E402", "E701", "E702", "E741", "E731"]

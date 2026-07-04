@@ -18,25 +18,11 @@ API = "https://discord.com/api/v10"
 DAY = 86400
 # Text channel kinds we index: GUILD_TEXT(0), GUILD_ANNOUNCEMENT(5), threads(10,11,12).
 TEXT_TYPES = {0, 5, 10, 11, 12}
-_URL_RE = re.compile(r"discord\.com/channels/(\d+)/(\d+)")
 _LEGACY_WEEK = re.compile(r"/\d{4}-W\d{2}$")  # old per-ISO-week digest ids, pruned on sight
 
 
-# -- refs + auth --------------------------------------------------------------------------------
-def parse_add(item: str):
-    s = item.strip()
-    m = _URL_RE.search(s)
-    if m:
-        return ("channels", m.group(2))
-    if s.lower().startswith("discord:guild:"):
-        return ("guilds", s.split(":", 2)[2])
-    if s.lower().startswith("discord:"):
-        val = s.split(":", 1)[1]
-        return ("channels", val) if val.isdigit() else None
-    return None
-
-
-def connect(*, token=None, fetch=None, log=print) -> dict:
+# -- auth ---------------------------------------------------------------------------------------
+def connect(*, token=None, fetch=None, log=print, **_) -> dict:
     if not token:
         raise RuntimeError("pass --token <bot-token> (Discord Developer Portal → your app → Bot → "
                            "Reset Token; enable the Message Content intent and invite the bot).")

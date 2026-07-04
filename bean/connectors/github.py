@@ -14,25 +14,14 @@ from ..store import Store
 from ..workspace import load_credential, save_credential
 
 API = "https://api.github.com"
-REPO_RE = re.compile(r"(?:github\.com[/:])?([\w.-]+)/([\w.-]+?)(?:\.git|/.*)?$")
 DEFAULT_INCLUDE = ["issues", "pulls"]
 
 
-# -- refs + auth --------------------------------------------------------------------------------
-def parse_add(item: str):
-    if item.startswith("#") or ("://" in item and "github.com" not in item):
-        return None
-    # Decline other connectors' scheme-prefixed refs (jira:, ms:, dropbox:, obsidian:, …) so the
-    # bare owner/repo matcher below doesn't swallow the "a/b" tail of e.g. `ms:teams:T/C`.
-    if "github.com" not in item and re.match(r"[a-z][a-z0-9+.-]*:", item):
-        return None
-    m = REPO_RE.search(item.strip())
-    if m and not item.startswith(("/", "~", "./", "../")):
-        return ("repos", f"{m.group(1)}/{m.group(2)}")
-    return None
-
-
-def connect(token: str, *, fetch=None, log=print) -> dict:
+# -- auth ---------------------------------------------------------------------------------------
+def connect(*, token=None, fetch=None, log=print, **_) -> dict:
+    if not token:
+        raise RuntimeError("pass --token ghp_… (GitHub → Settings → Developer settings → "
+                           "Personal access tokens, with repo read scope).")
     who = api_json(f"{API}/user", _headers(token), fetch=fetch)
     save_credential("github", {"token": token, "login": who.get("login")})
     log(f"✓ GitHub connected as {who.get('login')}.")
@@ -87,7 +76,10 @@ def sync(store: Store, config: dict, *, settings: dict, fetch=None, full: bool =
                     continue
                 if not is_pr and "issues" not in include:
                     continue
-                changed += _ingest_issue(store, repo, it, headers, fetch, log)
+                try:
+                    changed += _ingest_issue(store, repo, it, headers, fetch, log)
+                except Exception as err:  # one bad issue/PR must never abort the repo sync
+                    log(f"github: {repo}#{it.get('number')} skipped ({err})")
                 newest = max(newest or "", it.get("updated_at") or "")
         if newest:
             store.set_state(cursor_key, newest)
@@ -124,7 +116,7 @@ def _ingest_issue(store, repo, it, headers, fetch, log) -> list[str]:
     body = "\n".join(lines)
     login = (it.get("user") or {}).get("login")
     if store.upsert("github", doc_id, title=f"{repo}#{number} {it.get('title', '')}",
-                    url=it.get("html_link") or it.get("html_url"),
+                    url=it.get("html_url"),
                     revision_id=it.get("updated_at"), body=body,
                     meta={"author": login, "created_at": it.get("created_at"),
                           "modified_at": it.get("updated_at")}):

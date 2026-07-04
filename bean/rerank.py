@@ -16,7 +16,11 @@ def reranker(model_name: str):
             return []
         ce = _cache.get(model_name)
         if ce is None:
-            from fastembed.rerank.cross_encoder import TextCrossEncoder
+            try:
+                from fastembed.rerank.cross_encoder import TextCrossEncoder
+            except ImportError as err:  # optional extra; search() catches this and skips reranking
+                raise RuntimeError("the reranker needs fastembed — `pip install 'bean[rerank]'`, "
+                                   "or set search.rerank.enabled=false.") from err
             ce = _cache[model_name] = TextCrossEncoder(model_name=model_name)
         return list(ce.rerank(query, texts))
     return rerank
