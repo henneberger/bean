@@ -70,9 +70,11 @@ class Store:
             self._remote = Catalog(remote_uri=ws.remote_uri,
                                    storage_options={"region": region} if region else {})
             self._staging: dict[tuple[str, str], dict] = {}
+            self._staged_deletions: set[tuple[str, str]] = set()
         else:
             self._remote = None
             self._staging = None
+            self._staged_deletions = None
         # `state` (sync cursors etc.) is the only thing that stays in a private local DuckDB;
         # documents/revisions/edges now live on the Catalog's Lance datasets.
         self._state = duckdb.connect(str(ws.db_path))
@@ -167,6 +169,8 @@ class Store:
     # -- documents -------------------------------------------------------------------------------
     def get(self, source: str, doc_id: str) -> Doc | None:
         if self._cloud_writer:
+            if (source, doc_id) in self._staged_deletions:
+                return None
             staged = self._staging.get((source, doc_id))
             if staged is not None:
                 return self._doc_from_row(staged)
@@ -229,6 +233,11 @@ class Store:
         outside cloud-writer mode."""
         return list(self._staging.keys()) if self._cloud_writer else []
 
+    def staged_deletions(self) -> list[tuple[str, str]]:
+        """(source, doc_id) keys deleted via `delete()` while cloud-writer, awaiting a
+        `commit_deletions` to land them on the remote. Empty outside cloud-writer mode."""
+        return list(self._staged_deletions) if self._cloud_writer else []
+
     def commit_source(self, source: str, doc_ids: list, *, chunks_by_doc: dict,
                       edges_by_doc: dict) -> None:
         """Commit the given (already-embedded) staged docs to the REMOTE catalog as one retryable
@@ -275,8 +284,18 @@ class Store:
             commit_with_retry(lambda s=s, ids=ids: _commit(s, ids))
         for k in removed:
             self._staging.pop(k, None)
+            if self._cloud_writer:
+                self._staged_deletions.discard(k)
 
     def delete(self, source: str, doc_id: str) -> None:
+        """Remove a doc. In cloud-writer mode this never touches the (pull-only) replica: it just
+        drops any staged upsert for the key and records the deletion in `_staged_deletions`, so
+        `get()` reflects it as gone and the sync orchestration can `commit_deletions` it to the
+        remote. Non-cloud: writes straight to the local catalog, unchanged."""
+        if self._cloud_writer:
+            self._staging.pop((source, doc_id), None)
+            self._staged_deletions.add((source, doc_id))
+            return
         self.cat.delete_documents(source, [doc_id])
         self.cat.replace_edges(source, doc_id, [])
         # Chunk vectors live in Lance; index.delete_doc removes them (called by the sync/scope paths).

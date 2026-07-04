@@ -1499,5 +1499,69 @@ try:
 except Exception as err:
     ok(False, f"ensure_indexes(table=...) raised: {err}")
 
+# -- Task 2.4c: cloud-writer run_sync orchestration ----------------------------------------------
+# localfiles needs no network/credentials, so the WHOLE cloud path (pull -> fetch+embed -> commit
+# -> ensure_indexes -> pull) runs offline: a local-dir stand-in for S3, same trick as 2.2/2.3/2.4a/b.
+_rsc_src_dir = Path(tempfile.mkdtemp(prefix="bean-rsc-src-"))
+_rsc_md = _rsc_src_dir / "note.md"
+_rsc_md.write_text("Cloud sync note body about widgets and rollbacks for indexing purposes.\n")
+
+_rsc_remote_dir = Path(tempfile.mkdtemp(prefix="bean-rsc-remote-"))
+_rsc_ws = Workspace(repo("cloud-run-sync"))
+_rsc_ws.save_config({"settings": {"cloud": {
+    "enabled": True, "role": "writer", "bucket": "b", "prefix": "p", "region": "us-east-1"}},
+    "localfiles": {"paths": [str(_rsc_src_dir)]}})
+
+_orig_remote_uri_prop2 = Workspace.remote_uri
+Workspace.remote_uri = property(lambda self: str(_rsc_remote_dir))
+try:
+    _rsc_result = run_sync(_rsc_ws, keys={"localfiles"}, embed_fn=fake_embed)
+finally:
+    Workspace.remote_uri = _orig_remote_uri_prop2
+
+ok(_rsc_result["errors"] == [], f"cloud run_sync: no errors ({_rsc_result['errors']})")
+ok(len(_rsc_result["changed"]) == 1, "cloud run_sync: one changed doc reported")
+ok(_rsc_result["chunks"] > 0, "cloud run_sync: chunks count reported")
+ok(_rsc_result["embedded"] == 1, "cloud run_sync: one doc committed (embedded count)")
+
+_rsc_remote_con = Catalog(remote_uri=str(_rsc_remote_dir)).duck()
+ok(_rsc_remote_con.execute("SELECT count(*) FROM documents").fetchone()[0] == 1,
+   "cloud run_sync: the doc landed on the REMOTE catalog")
+ok(_rsc_remote_con.execute("SELECT count(*) FROM chunks").fetchone()[0] > 0,
+   "cloud run_sync: chunks landed on the REMOTE catalog")
+_rsc_remote_con.close()
+
+_rsc_replica_con = Catalog(_rsc_ws.catalog_dir).duck()
+ok(_rsc_replica_con.execute("SELECT count(*) FROM documents").fetchone()[0] == 1,
+   "cloud run_sync: the final pull() brought the doc into the LOCAL replica")
+ok(_rsc_replica_con.execute("SELECT count(*) FROM chunks").fetchone()[0] > 0,
+   "cloud run_sync: the final pull() brought the chunks into the LOCAL replica")
+_rsc_replica_con.close()
+
+# Deletion: remove the file and re-sync — the doc AND its chunks must disappear from the REMOTE
+# (proving Store.delete() staged the removal and commit_deletions cascaded), and the replica must
+# reflect it too (not be corrupted by a writer accidentally touching it directly).
+_rsc_md.unlink()
+Workspace.remote_uri = property(lambda self: str(_rsc_remote_dir))
+try:
+    _rsc_result2 = run_sync(_rsc_ws, keys={"localfiles"}, embed_fn=fake_embed)
+finally:
+    Workspace.remote_uri = _orig_remote_uri_prop2
+
+ok(_rsc_result2["errors"] == [], f"cloud run_sync (delete pass): no errors ({_rsc_result2['errors']})")
+ok(len(_rsc_result2["removed"]) == 1, "cloud run_sync: the deleted file reported as removed")
+
+_rsc_remote_con2 = Catalog(remote_uri=str(_rsc_remote_dir)).duck()
+ok(_rsc_remote_con2.execute("SELECT count(*) FROM documents").fetchone()[0] == 0,
+   "cloud run_sync: deletion cascaded to remove the doc from the REMOTE")
+ok(_rsc_remote_con2.execute("SELECT count(*) FROM chunks").fetchone()[0] == 0,
+   "cloud run_sync: deletion cascaded to remove the doc's chunks from the REMOTE")
+_rsc_remote_con2.close()
+
+_rsc_replica_con2 = Catalog(_rsc_ws.catalog_dir).duck()
+ok(_rsc_replica_con2.execute("SELECT count(*) FROM documents").fetchone()[0] == 0,
+   "cloud run_sync: the replica reflects the deletion too, after the final pull (not corrupted)")
+_rsc_replica_con2.close()
+
 print(f"bean: {CHECKS - FAILED}/{CHECKS} checks passed" if FAILED == 0 else f"bean: {FAILED}/{CHECKS} checks FAILED")
 sys.exit(0 if FAILED == 0 else 1)
