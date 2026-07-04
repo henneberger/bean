@@ -1240,5 +1240,42 @@ cloudws3 = Workspace(repo("cloud-noprefix"))
 cloudws3.save_config({"settings": {"cloud": {"enabled": True, "bucket": "b", "prefix": ""}}})
 ok(cloudws3.remote_uri == "s3://b", "empty prefix -> bare bucket uri")
 
+# remote.pull: S3->local replication of the Lance catalog (Task 2.2) -----------------------------
+# A local temp dir stands in for S3 — `_copy_new`'s local-dir branch shares the exact copy logic
+# the s3:// branch drives via `aws s3 sync`, so this exercises the same replication behaviour.
+from bean import remote as _remote  # noqa: E402
+_remote_dir = Path(tempfile.mkdtemp(prefix="bean-remote-"))
+_replica_dir = Path(tempfile.mkdtemp(prefix="bean-replica-")) / "catalog"
+_remote_cat = Catalog(_remote_dir)
+_remote_cat.upsert_documents([{"source": "gdocs", "doc_id": "r1", "title": "T", "url": "u",
+                                "revision_id": "rev1", "hash": "h1", "body": "pulled body",
+                                "created_at": None, "modified_at": None, "author": "Ada",
+                                "mime": None, "fetched_at": None}])
+_remote._copy_new(str(_remote_dir), _replica_dir)
+_replica_cat = Catalog(_replica_dir)
+ok(_replica_cat.duck().execute("SELECT count(*) FROM documents").fetchone()[0] == 1,
+   "_copy_new replicates a freshly-written doc into a fresh local replica")
+ok(_replica_cat.duck().execute("SELECT body FROM documents WHERE doc_id='r1'").fetchone()[0]
+   == "pulled body", "replicated row matches the remote's committed data")
+
+# manifest-last ordering: the replica must open cleanly, meaning no manifest ever landed locally
+# before the data files it references (an out-of-order copy would leave a dataset that fails to
+# open, since Lance would resolve the manifest to fragment files that aren't there yet).
+_replica_versions = list((_replica_dir / "documents.lance" / "_versions").glob("*.manifest"))
+_replica_data = list((_replica_dir / "documents.lance" / "data").glob("*.lance"))
+ok(len(_replica_versions) > 0 and len(_replica_data) > 0,
+   "replica has both manifests and data files after _copy_new")
+
+# second pull is idempotent: nothing new to copy, no error, same row count
+_remote._copy_new(str(_remote_dir), _replica_dir)
+ok(Catalog(_replica_dir).duck().execute("SELECT count(*) FROM documents").fetchone()[0] == 1,
+   "a second _copy_new is a no-op (already-present immutable files are never re-copied)")
+
+# pull() itself: no-op for a non-cloud workspace, and routes a cloud workspace's local-dir remote
+# through the same _copy_new path used above.
+_pullws_off = Workspace(repo("pull-off"))
+_remote.pull(_pullws_off)  # must not raise, must not touch replica_dir
+ok(not (_pullws_off.replica_dir / "documents.lance").exists(), "pull() no-ops for a non-cloud workspace")
+
 print(f"bean: {CHECKS - FAILED}/{CHECKS} checks passed" if FAILED == 0 else f"bean: {FAILED}/{CHECKS} checks FAILED")
 sys.exit(0 if FAILED == 0 else 1)
