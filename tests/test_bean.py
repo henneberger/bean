@@ -1715,7 +1715,24 @@ ok(_pl_con.execute("SELECT body FROM documents WHERE doc_id='pl1'").fetchone()[0
    == "pull command body", "cmd_pull: the pulled document matches the remote's")
 _pl_con.close()
 with Store(_pl_ws) as _pl_store:
-    ok(_pl_store.get_state("last_pull") is not None, "cmd_pull records last_pull in state")
+    _pl_last_pull = _pl_store.get_state("last_pull")
+    ok(_pl_last_pull is not None, "cmd_pull records last_pull in state")
+
+# Regression: cmd_pull must write last_pull as a NUMERIC epoch (matching auto_pull's format), not
+# an ISO string -- otherwise auto_pull's `isinstance(last_pull, (int, float))` guard fails after
+# every manual `bean pull`, and the throttle silently stops working.
+ok(isinstance(_pl_last_pull, (int, float)) and not isinstance(_pl_last_pull, bool),
+   "cmd_pull writes last_pull as a numeric epoch, not an ISO string")
+
+# ...and because it's now the same format auto_pull writes, a read shortly after a manual pull
+# correctly HOLDS the throttle instead of re-pulling (the bug's core symptom).
+Workspace.remote_uri = property(lambda self: str(_pl_remote_dir))
+try:
+    _pl_throttle_holds = _remote.auto_pull(_pl_ws, min_interval=60, now=_pl_last_pull + 5)
+finally:
+    Workspace.remote_uri = _orig_remote_uri_prop7
+ok(_pl_throttle_holds is False,
+   "auto_pull throttle holds shortly after a manual cmd_pull (numeric last_pull interoperates)")
 
 # cmd_status: cloud fields appear for a cloud workspace, and are absent for a non-cloud one.
 _st_buf = _io.StringIO()
@@ -1728,6 +1745,13 @@ finally:
 _st_out = _st_buf.getvalue()
 ok("consumer" in _st_out, "cmd_status shows the cloud role")
 ok(str(_pl_remote_dir) in _st_out, "cmd_status shows the remote URI")
+
+# Regression: with a numeric last_pull already recorded (from the cmd_pull above), cmd_status must
+# FORMAT it into a readable UTC timestamp rather than printing the bare float.
+_st_last_line = next(line for line in _st_out.splitlines() if line.startswith("cloud:"))
+ok(str(_pl_last_pull) not in _st_last_line,
+   "cmd_status does not print a bare numeric last_pull")
+ok("20" in _st_last_line, "cmd_status formats last_pull into a readable (20xx-prefixed) timestamp")
 
 _st_off_buf = _io.StringIO()
 with _ctx.redirect_stdout(_st_off_buf):

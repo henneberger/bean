@@ -196,9 +196,9 @@ def cmd_pull(ws: Workspace, args) -> int:
     from . import remote
     remote.pull(ws)
     print(f"✓ pulled {ws.remote_uri} → local replica")
-    from datetime import datetime, timezone
+    import time
     with Store(ws) as store:
-        store.set_state("last_pull", datetime.now(timezone.utc).isoformat())
+        store.set_state("last_pull", time.time())
     return 0
 
 
@@ -229,7 +229,11 @@ def cmd_status(ws: Workspace, args) -> int:
     print(f"workspace: {ws.dir}")
     if ws.is_cloud:
         role = ws.cloud.get("role", "?")
-        last = last_pull or last_sync or "never"
+        if isinstance(last_pull, (int, float)):
+            from datetime import datetime, timezone
+            last = datetime.fromtimestamp(last_pull, tz=timezone.utc).isoformat(timespec="seconds")
+        else:
+            last = last_pull or last_sync or "never"
         print(f"cloud:     role={role} remote={ws.remote_uri} last sync/pull={last}")
     from .embed import identity
     em = identity(settings["embedding"])

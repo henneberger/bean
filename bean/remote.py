@@ -29,8 +29,10 @@ def auto_pull(ws, *, min_interval: int = 60, now: float | None = None) -> bool:
     (manual `bean pull` or a prior `auto_pull`) landed less than `min_interval` seconds ago, so
     back-to-back reads don't each trigger a fetch. No-op (returns False) in local (non-cloud) mode.
     `now` is injectable for deterministic tests; defaults to the current epoch seconds. Returns
-    whether a pull actually ran. A `last_pull` left by `bean pull` (an ISO string, not a number) is
-    treated as "no timing info yet" rather than raising — it just means this call pulls again."""
+    whether a pull actually ran. `last_pull` is always numeric epoch seconds — written the same way
+    by `bean pull` and by this function — so a manual pull correctly holds the throttle here too.
+    A non-numeric `last_pull` (e.g. stale/corrupt state) is treated as "no timing info yet" rather
+    than raising — it just means this call pulls again."""
     if not ws.is_cloud:
         return False
     import time
