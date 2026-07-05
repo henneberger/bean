@@ -1844,5 +1844,117 @@ try:
 finally:
     _remote.auto_pull = _orig_auto_pull
 
+# -- Task 4.1: multi-writer convergence -----------------------------------------------------------
+# Two INDEPENDENT cloud-writer Stores (own Workspace, own local replica catalog, own private state
+# db) sharing ONE remote catalog directory. Verifies commit_source/commit_deletions converge:
+# disjoint keys from different writers both survive, the same key is last-writer-wins (Lance
+# merge_insert on (source, doc_id), same primitive proven in 2.4a), chunks aren't duplicated/mixed,
+# and each writer's private cursor state (kept in its own `ws.db_path` DuckDB, never the shared
+# Lance remote -- see Store.__init__/get_state/set_state) never leaks into the remote or the peer.
+_mw_remote_dir = Path(tempfile.mkdtemp(prefix="bean-mw-remote-"))
+_orig_remote_uri_prop9 = Workspace.remote_uri
+
+
+def _mw_make_writer(name):
+    ws = Workspace(repo(f"mw-{name}"))
+    ws.save_config({"settings": {"cloud": {
+        "enabled": True, "role": "writer", "bucket": "b", "prefix": "p", "region": "us-east-1"}}})
+    Workspace.remote_uri = property(lambda self: str(_mw_remote_dir))
+    try:
+        store = Store(ws)
+    finally:
+        Workspace.remote_uri = _orig_remote_uri_prop9
+    store._remote = Catalog(remote_uri=str(_mw_remote_dir))
+    return ws, store
+
+
+_mw_ws_a, _mw_a = _mw_make_writer("a")
+_mw_ws_b, _mw_b = _mw_make_writer("b")
+
+ok(_mw_ws_a.catalog_dir != _mw_ws_b.catalog_dir,
+   "multi-writer: A and B have separate local replica catalogs")
+ok(_mw_ws_a.db_path != _mw_ws_b.db_path,
+   "multi-writer: A and B have separate private state databases")
+ok(_mw_a is not _mw_b, "multi-writer: A and B are genuinely separate Store instances")
+
+
+def _mw_chunk(source, doc_id, text):
+    return [{"id": f"{doc_id}-0", "source": source, "doc_id": doc_id, "title": "T", "url": "u",
+             "start": 0, "end": len(text), "text": text, "ord": 0,
+             "vector": [0.1, 0.2, 0.3, 0.4]}]
+
+
+# Scenario 1: disjoint keys committed by different writers both survive on the shared remote.
+ok(_mw_a.upsert("src", "a-only", title="A", url=None, revision_id="r1", body="A doc") is True,
+   "multi-writer: A stages its own brand-new doc (no replica baseline needed to stage as changed)")
+_mw_a.commit_source("src", ["a-only"],
+                     chunks_by_doc={("src", "a-only"): _mw_chunk("src", "a-only", "A doc")},
+                     edges_by_doc={})
+
+ok(_mw_b.upsert("src", "b-only", title="B", url=None, revision_id="r1", body="B doc") is True,
+   "multi-writer: B stages its own brand-new doc")
+_mw_b.commit_source("src", ["b-only"],
+                     chunks_by_doc={("src", "b-only"): _mw_chunk("src", "b-only", "B doc")},
+                     edges_by_doc={})
+
+_mw_con1 = Catalog(remote_uri=str(_mw_remote_dir)).duck()
+ok(_mw_con1.execute("SELECT count(*) FROM documents WHERE doc_id='a-only'").fetchone()[0] == 1,
+   "multi-writer: A's disjoint doc survives on the shared remote")
+ok(_mw_con1.execute("SELECT count(*) FROM documents WHERE doc_id='b-only'").fetchone()[0] == 1,
+   "multi-writer: B's disjoint doc survives on the shared remote too (not clobbered by A's commit)")
+_mw_con1.close()
+
+# Scenario 2: same key -- A commits first, THEN B commits -> last writer (B) wins, exactly one row.
+ok(_mw_a.upsert("src", "shared", title="Shared", url=None, revision_id="r1", body="from A") is True,
+   "multi-writer: A stages the shared key")
+_mw_a.commit_source("src", ["shared"],
+                     chunks_by_doc={("src", "shared"): _mw_chunk("src", "shared", "from A")},
+                     edges_by_doc={})
+
+ok(_mw_b.upsert("src", "shared", title="Shared", url=None, revision_id="r1", body="from B") is True,
+   "multi-writer: B stages the same shared key on its own independent Store/replica")
+_mw_b.commit_source("src", ["shared"],
+                     chunks_by_doc={("src", "shared"): _mw_chunk("src", "shared", "from B")},
+                     edges_by_doc={})
+
+_mw_con2 = Catalog(remote_uri=str(_mw_remote_dir)).duck()
+ok(_mw_con2.execute("SELECT count(*) FROM documents WHERE doc_id='shared'").fetchone()[0] == 1,
+   "multi-writer: same-key writes from two writers converge to exactly one document row")
+ok(_mw_con2.execute("SELECT body, hash FROM documents WHERE doc_id='shared'").fetchone()
+   == ("from B", content_hash("from B")),
+   "multi-writer: the LAST committer (B, which committed after A) wins the shared key")
+
+# Scenario 3: chunks converge too -- only B's (last writer's) chunk rows remain, no mixing/dupes.
+ok(_mw_con2.execute("SELECT count(*) FROM chunks WHERE doc_id='shared'").fetchone()[0] == 1,
+   "multi-writer: exactly one chunk row survives for the shared key (not duplicated across writers)")
+ok(_mw_con2.execute("SELECT text FROM chunks WHERE doc_id='shared'").fetchone()[0] == "from B",
+   "multi-writer: the surviving chunk reflects B's (last writer's) content only, not A's and not a mix")
+_mw_con2.close()
+
+# Scenario 4: private per-writer cursor state never leaks into the shared remote or the other writer.
+_mw_a.set_state("src.cursor.chan", 111)
+_mw_b.set_state("src.cursor.chan", 222)
+ok(_mw_a.get_state("src.cursor.chan") == 111,
+   "multi-writer: A's own cursor state reads back as A's own value")
+ok(_mw_b.get_state("src.cursor.chan") == 222,
+   "multi-writer: B's own cursor state reads back as B's own value, unaffected by A's write")
+_mw_remote_tables = Catalog(remote_uri=str(_mw_remote_dir)).db.list_tables()
+ok("state" not in _mw_remote_tables and "embedded" not in _mw_remote_tables,
+   "multi-writer: the shared remote catalog has no state/cursor table at all -- cursor state lives "
+   "only in each writer's private ws.db_path DuckDB (Store._state), never on the shared Lance remote")
+
+# Scenario 5: deletion propagates -- A deletes its own doc; the peer's docs/chunks are untouched.
+_mw_a.commit_deletions([("src", "a-only")])
+_mw_con3 = Catalog(remote_uri=str(_mw_remote_dir)).duck()
+ok(_mw_con3.execute("SELECT count(*) FROM documents WHERE doc_id='a-only'").fetchone()[0] == 0,
+   "multi-writer: commit_deletions removes A's doc from the shared remote")
+ok(_mw_con3.execute("SELECT count(*) FROM chunks WHERE doc_id='a-only'").fetchone()[0] == 0,
+   "multi-writer: commit_deletions cascades to remove A's doc's chunks too (no orphaned vectors)")
+ok(_mw_con3.execute("SELECT count(*) FROM documents WHERE doc_id='b-only'").fetchone()[0] == 1,
+   "multi-writer: B's disjoint doc is untouched by A's unrelated deletion")
+ok(_mw_con3.execute("SELECT count(*) FROM documents WHERE doc_id='shared'").fetchone()[0] == 1,
+   "multi-writer: the shared-key doc (B's version) is untouched by A's unrelated deletion")
+_mw_con3.close()
+
 print(f"bean: {CHECKS - FAILED}/{CHECKS} checks passed" if FAILED == 0 else f"bean: {FAILED}/{CHECKS} checks FAILED")
 sys.exit(0 if FAILED == 0 else 1)
