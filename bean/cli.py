@@ -11,6 +11,8 @@ from a terminal; the plugin calls these subcommands to retrieve context).
   bean neighbors <chunk-id> [--radius N]
   bean config [get PATH | set PATH VALUE | list]
   bean cloud init --bucket NAME [--prefix P] [--region R]   Become a cloud writer (push local index to S3)
+  bean cloud connect --bucket NAME [--prefix P] [--region R]   Become a cloud consumer (pull from S3)
+  bean pull                       Fetch the latest cloud index into the local replica
   bean sql "SELECT …"             Read-only SQL over the store (no query = print the schema)
   bean status
 
@@ -178,11 +180,29 @@ def cmd_init(ws: Workspace, args) -> int:
     return 0
 
 
+def cmd_pull(ws: Workspace, args) -> int:
+    """Fetch the latest cloud index into the local replica. No-op (and a loud non-zero exit) when
+    `ws` isn't cloud-connected — there's nothing to pull."""
+    if not ws.is_cloud:
+        print("✗ not a cloud workspace — run `bean cloud init` or `bean cloud connect` first",
+              file=sys.stderr)
+        return 1
+    from . import remote
+    remote.pull(ws)
+    print(f"✓ pulled {ws.remote_uri} → local replica")
+    from datetime import datetime, timezone
+    with Store(ws) as store:
+        store.set_state("last_pull", datetime.now(timezone.utc).isoformat())
+    return 0
+
+
 def cmd_status(ws: Workspace, args) -> int:
     scopes, repo_cfg, glob_cfg, gws = _scope_ctx(ws)
     with Store(ws) as store:
         rc = store.counts()
         indexed_model = store.get_state("embedding.model")
+        last_sync = store.get_state("last_sync")
+        last_pull = store.get_state("last_pull")
     with Store(gws) as gstore:
         gc = gstore.counts()
     settings = cfgmod.resolve(ws)
@@ -201,6 +221,10 @@ def cmd_status(ws: Workspace, args) -> int:
                           "indexed": counts.get(s.key, 0),
                           "lists": {name: node.get(name) or [] for name in s.lists}}
     print(f"workspace: {ws.dir}")
+    if ws.is_cloud:
+        role = ws.cloud.get("role", "?")
+        last = last_pull or last_sync or "never"
+        print(f"cloud:     role={role} remote={ws.remote_uri} last sync/pull={last}")
     from .embed import identity
     em = identity(settings["embedding"])
     warn = "" if (not indexed_model or indexed_model == em) else f"  ⚠ index built with {indexed_model} — run `bean sync --rebuild`"
@@ -654,6 +678,9 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--prefix", help="key prefix under the bucket (default: none/root)")
     p.add_argument("--region", help="AWS region")
     p.set_defaults(fn=cmd_cloud)
+
+    p = sub.add_parser("pull", help="fetch the latest cloud index into the local replica")
+    p.set_defaults(fn=cmd_pull)
 
     p = sub.add_parser("status", help="workspace, auth, and index state")
     p.set_defaults(fn=cmd_status)

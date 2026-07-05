@@ -1677,5 +1677,62 @@ with _ctx.redirect_stderr(_io.StringIO()):
     ok(cmd_cloud(Workspace(repo("cloud-connect-nobucket")), _cloud_args("connect")) == 2,
        "cmd_cloud connect fails loudly when --bucket is missing")
 
+# -- Task 3.3: `bean pull` + cloud fields in `bean status` ---------------------------------------
+from bean.cli import cmd_pull, cmd_status  # noqa: E402
+
+# cmd_pull on a plain (non-cloud) workspace: non-zero, no crash, no state written.
+_pl_off_ws = Workspace(repo("pull-off"))
+with _ctx.redirect_stdout(_io.StringIO()), _ctx.redirect_stderr(_io.StringIO()):
+    _pl_off_rc = cmd_pull(_pl_off_ws, _types.SimpleNamespace())
+ok(_pl_off_rc != 0, "cmd_pull on a non-cloud workspace returns non-zero")
+
+# cmd_pull on a cloud workspace: seed a local-dir "remote" with a doc, pull it down through the CLI.
+_pl_remote_dir = Path(tempfile.mkdtemp(prefix="bean-pull-remote-"))
+Catalog(_pl_remote_dir).upsert_documents([{
+    "source": "gdocs", "doc_id": "pl1", "title": "T", "url": "u", "revision_id": "rev1",
+    "hash": "h1", "body": "pull command body", "created_at": None, "modified_at": None,
+    "author": "Ada", "mime": None, "fetched_at": None,
+}])
+_pl_ws = Workspace(repo("pull-on"))
+_pl_ws.save_config({"settings": {"cloud": {
+    "enabled": True, "role": "consumer", "bucket": "b", "prefix": "p", "region": "us-east-1"}}})
+
+_orig_remote_uri_prop7 = Workspace.remote_uri
+Workspace.remote_uri = property(lambda self: str(_pl_remote_dir))
+try:
+    _pl_buf = _io.StringIO()
+    with _ctx.redirect_stdout(_pl_buf):
+        _pl_rc = cmd_pull(_pl_ws, _types.SimpleNamespace())
+finally:
+    Workspace.remote_uri = _orig_remote_uri_prop7
+
+ok(_pl_rc == 0, "cmd_pull on a cloud workspace returns 0")
+ok("pulled" in _pl_buf.getvalue(), "cmd_pull prints a confirmation")
+_pl_con = Catalog(_pl_ws.catalog_dir).duck()
+ok(_pl_con.execute("SELECT count(*) FROM documents").fetchone()[0] == 1,
+   "cmd_pull: the remote's doc landed in the local replica")
+ok(_pl_con.execute("SELECT body FROM documents WHERE doc_id='pl1'").fetchone()[0]
+   == "pull command body", "cmd_pull: the pulled document matches the remote's")
+_pl_con.close()
+with Store(_pl_ws) as _pl_store:
+    ok(_pl_store.get_state("last_pull") is not None, "cmd_pull records last_pull in state")
+
+# cmd_status: cloud fields appear for a cloud workspace, and are absent for a non-cloud one.
+_st_buf = _io.StringIO()
+Workspace.remote_uri = property(lambda self: str(_pl_remote_dir))
+try:
+    with _ctx.redirect_stdout(_st_buf):
+        cmd_status(_pl_ws, _types.SimpleNamespace())
+finally:
+    Workspace.remote_uri = _orig_remote_uri_prop7
+_st_out = _st_buf.getvalue()
+ok("consumer" in _st_out, "cmd_status shows the cloud role")
+ok(str(_pl_remote_dir) in _st_out, "cmd_status shows the remote URI")
+
+_st_off_buf = _io.StringIO()
+with _ctx.redirect_stdout(_st_off_buf):
+    cmd_status(_pl_off_ws, _types.SimpleNamespace())
+ok("cloud:" not in _st_off_buf.getvalue(), "cmd_status omits the cloud section for a non-cloud workspace")
+
 print(f"bean: {CHECKS - FAILED}/{CHECKS} checks passed" if FAILED == 0 else f"bean: {FAILED}/{CHECKS} checks FAILED")
 sys.exit(0 if FAILED == 0 else 1)
