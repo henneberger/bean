@@ -68,7 +68,9 @@ def run_sync(ws: Workspace, *, only: str | None = None, keys: set | None = None,
 
     `refetch=False` skips the fetch phase entirely and only re-embeds already-stored docs (used by
     tests to re-embed a hand-populated store without touching any live source)."""
-    config = ws.load_config()
+    # Committed `.bean/config.json` refs merged under the personal ones — a fresh clone of a
+    # repo with a `.bean` folder syncs the team's tracked sources with zero setup.
+    config = ws.effective_config() if hasattr(ws, "effective_config") else ws.load_config()
     settings = cfgmod.resolve(ws)
     if embed_fn is None:
         from .embed import embedder  # lazy: model load only when embedding
@@ -77,7 +79,7 @@ def run_sync(ws: Workspace, *, only: str | None = None, keys: set | None = None,
     if ws.is_cloud and ws.cloud.get("role") != "writer":
         raise RuntimeError(
             "this is a read-only cloud consumer — nothing to sync; run `bean pull` to fetch the "
-            "latest index, or `bean cloud init` to become a writer.")
+            "latest index, or become the writer (`bean cloud role writer`; for s3, `bean cloud init`).")
 
     if ws.is_cloud and ws.cloud.get("role") == "writer":
         if full:
@@ -92,6 +94,7 @@ def run_sync(ws: Workspace, *, only: str | None = None, keys: set | None = None,
     changed: list[tuple[str, str]] = []
     removed: list[tuple[str, str]] = []
     errors: list[str] = []
+    skipped: list[str] = []
     from .workspace import credential_context
     # Local sources read this repo's credentials (fallback shared); global sources read the shared.
     cred_ws = None if getattr(ws, "is_global", False) else ws
@@ -103,6 +106,12 @@ def run_sync(ws: Workspace, *, only: str | None = None, keys: set | None = None,
                 continue
             src_cfg = config.get(src.config_key) or {}
             if not src.is_active(src_cfg):
+                continue
+            # A source can be tracked without being connected — normal when a committed `.bean`
+            # declares team sources this user hasn't authed yet. Skip with a nudge, not an error.
+            if src.auth and src.connected and not src.connected():
+                log(f"{src.key}: tracked but not connected — skipped (run `bean auth {src.auth}`)")
+                skipped.append(src.key)
                 continue
             try:
                 r = src.sync(store, src_cfg, settings=settings, fetch=fetch, full=full,
@@ -151,14 +160,15 @@ def run_sync(ws: Workspace, *, only: str | None = None, keys: set | None = None,
         from datetime import datetime, timezone
         store.set_state("last_sync", datetime.now(timezone.utc).isoformat())
 
-    return {"changed": changed, "removed": removed, "errors": errors,
+    return {"changed": changed, "removed": removed, "errors": errors, "skipped": skipped,
             "chunks": chunks_indexed, "embedded": len(embed_targets)}
 
 
-def _active_sources(config: dict, *, only: str | None, keys: set | None):
+def _active_sources(config: dict, *, only: str | None, keys: set | None, log=lambda m: None):
     """Same source-filter/active logic as the local loop above: `only`/`keys` narrow which
     registered sources run, `is_active` skips a source with nothing tracked (and no
-    always-when-connected override)."""
+    always-when-connected override), and a tracked-but-not-connected source is skipped with a
+    nudge rather than erroring (see the local loop)."""
     for src in SOURCES:
         if only and only != src.key:
             continue
@@ -166,6 +176,9 @@ def _active_sources(config: dict, *, only: str | None, keys: set | None):
             continue
         src_cfg = config.get(src.config_key) or {}
         if not src.is_active(src_cfg):
+            continue
+        if src.auth and src.connected and not src.connected():
+            log(f"{src.key}: tracked but not connected — skipped (run `bean auth {src.auth}`)")
             continue
         yield src, src_cfg
 
@@ -194,7 +207,7 @@ def _run_sync_cloud(ws: Workspace, *, config: dict, settings: dict, embed_fn, on
     cred_ws = None if getattr(ws, "is_global", False) else ws
 
     with credential_context(cred_ws), Store(ws) as store:
-        for src, src_cfg in (_active_sources(config, only=only, keys=keys) if refetch else ()):
+        for src, src_cfg in (_active_sources(config, only=only, keys=keys, log=log) if refetch else ()):
             snap = store.snapshot_state()
             try:
                 r = src.sync(store, src_cfg, settings=settings, fetch=fetch, full=full,
@@ -235,5 +248,5 @@ def _run_sync_cloud(ws: Workspace, *, config: dict, settings: dict, embed_fn, on
 
     remote.pull(ws)  # pull the just-committed data down so local reads see it immediately
 
-    return {"changed": changed, "removed": removed, "errors": errors,
+    return {"changed": changed, "removed": removed, "errors": errors, "skipped": [],
             "chunks": chunks_indexed, "embedded": embedded}

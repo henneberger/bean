@@ -1,10 +1,13 @@
 """Resolved configuration — everything is a config value, nothing is an environment variable.
 
-Three layers, deep-merged in order (later wins):
+Four layers, deep-merged in order (later wins):
 
   1. DEFAULTS          — the values baked in here.
   2. global config     — ~/.bean/config.json (per user; embedding model, chunking, OCR…).
-  3. workspace settings — the "settings" block of a repo's config.json (per-repo overrides).
+  3. repo settings     — the "settings" block of the repo's committed .bean/config.json
+                         (team-shared, versioned with the code; e.g. the storage backend).
+  4. workspace settings — the "settings" block of the personal workspace config.json
+                         (per-repo, per-user overrides — a user beats the team default).
 
 `resolve(ws)` returns the merged dict. `get(cfg, "embedding.plugin")` and the `bean config`
 CLI walk it by dotted path so any leaf is reachable without special-casing. Secrets never live
@@ -111,12 +114,23 @@ DEFAULTS: dict = {
     "discord": {
         "lookback_days": 14,  # same initial backfill as Slack (first sync only, then the cursor)
     },
+    "git": {
+        # Commit messages are short — chat-sized windows keep a hit tight to one commit instead
+        # of smearing several unrelated commits into one chunk.
+        "chunking": {"lines": 15, "overlap": 3, "max_chars": 1000, "min_chars": 10},
+    },
     "cloud": {
-        # Whether the Lance catalog lives on S3 (with a full local replica) instead of purely
-        # locally. false = the local-only behaviour from Phase 1; nothing else in this block
-        # matters when disabled.
+        # Whether the Lance catalog lives on a shared remote (with a full local replica) instead
+        # of purely locally. false = local-only; nothing else in this block matters when disabled.
         "enabled": False,
-        "role": "writer",   # "writer" | "consumer" — who may push commits to the shared bucket
+        # Where the shared catalog lives: "s3" (bucket/prefix/region below) or "git" — the
+        # catalog sits inside the repo at .bean/catalog, versioned with git (put data files on
+        # git-lfs; `bean cloud init --backend git` writes the .gitattributes). With "git" the
+        # bucket fields are ignored and consumers need nothing: a clone already has the catalog.
+        "backend": "s3",
+        # "writer" | "consumer" — who may push commits to the shared catalog. Keep ONE writer
+        # (a maintainer or CI job); Lance versions don't merge across git branches.
+        "role": "writer",
         "bucket": "",
         "prefix": "",
         "region": "",
@@ -162,9 +176,13 @@ def save_global(cfg: dict) -> None:
 
 
 def resolve(ws=None) -> dict:
-    """DEFAULTS ← global ← this workspace's `settings` block."""
+    """DEFAULTS ← global ← the repo's committed `.bean` `settings` ← the personal workspace
+    `settings` block."""
     cfg = _merge(DEFAULTS, load_global())
     if ws is not None:
+        loader = getattr(ws, "load_repo_config", None)
+        if loader:
+            cfg = _merge(cfg, (loader() or {}).get("settings") or {})
         cfg = _merge(cfg, (ws.load_config() or {}).get("settings") or {})
     return cfg
 

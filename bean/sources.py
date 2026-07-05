@@ -11,8 +11,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from .connectors import (confluence, discord, gdocs, github, hubspot, jira, localfiles, microsoft,
-                         salesforce, slack, zendesk)
+from .connectors import (confluence, discord, gdocs, git, github, hubspot, jira, localfiles,
+                         microsoft, salesforce, slack, zendesk)
 from .workspace import load_credential
 
 
@@ -90,6 +90,9 @@ CORE_SOURCES: list[Source] = [
     Source("github", "github", "GitHub", ("repos",), github.sync,
            auth="github", add_help="a repo as owner/name or a github.com URL", auth_help="--token ghp_…",
            connect=github.connect, connected=github.connected),
+    Source("git", "git", "Git history", ("repos",), git.sync,
+           auth=None, add_help="a git repo path (optional; the current repo's history indexes by default)",
+           connected=git.connected, always_when_connected=True),
     Source("confluence", "confluence", "Confluence", ("spaces", "pages"),
            confluence.sync, auth="confluence",
            add_help="a Confluence page/space URL, confluence:SPACEKEY, or confluence:page:ID",

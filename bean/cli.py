@@ -11,18 +11,23 @@ from a terminal; the plugin calls these subcommands to retrieve context).
   bean neighbors <chunk-id> [--radius N]
   bean config [get PATH | set PATH VALUE | list]
   bean cloud init --bucket NAME [--prefix P] [--region R]   Become a cloud writer (push local index to S3)
+  bean cloud init --backend git   Commit the catalog into the repo at .bean/catalog (git-lfs data)
   bean cloud connect --bucket NAME [--prefix P] [--region R]   Become a cloud consumer (pull from S3)
+  bean cloud role writer|consumer   Set this machine's role for the current repo
   bean pull                       Fetch the latest cloud index into the local replica
   bean sql "SELECT …"             Read-only SQL over the store (no query = print the schema)
   bean status
 
 Tracked refs (docs/channels/pages/repos/paths) are written straight into a source's config lists —
-`bean init` prints each source's config file + list names. `sync --rebuild` does a full resweep:
-it ignores cursors, re-fetches, and re-embeds every doc (so a chunking or embedding-model change
-lands on the whole index).
+`bean init` prints each source's config file + list names. Refs meant for the whole team go in the
+repo's committed `.bean/config.json` (same shape); everyone who clones inherits them. `sync
+--rebuild` does a full resweep: it ignores cursors, re-fetches, and re-embeds every doc (so a
+chunking or embedding-model change lands on the whole index).
 
-All state lives under ~/.bean/<repo-name>-<hash>/ — one workspace per repo. Credentials are
-per user at ~/.bean/credentials/ (mode 0600). Configuration is files, never env vars.
+Personal state lives under ~/.bean/<repo-name>-<hash>/ — one workspace per repo. Credentials are
+per user at ~/.bean/credentials/ (mode 0600) and never enter the repo. The committed `.bean/`
+folder carries the shareable side: config, and (under the git storage backend) the catalog
+itself. Configuration is files, never env vars.
 """
 
 from __future__ import annotations
@@ -125,9 +130,11 @@ def _cred_path(name: str):
 
 def _scope_ctx(ws: Workspace):
     """(scopes, repo_config, global_config, global_ws) — everything init/status need to place each
-    source in its scope."""
+    source in its scope. The repo config is the *effective* view: committed `.bean/config.json`
+    refs merged under the personal workspace ones (read-only here; writes go to one file or the
+    other, never this merge)."""
     gws = Workspace.global_()
-    return (load_scopes(), _ensure_lists(ws.load_config()), _ensure_lists(gws.load_config()), gws)
+    return (load_scopes(), _ensure_lists(ws.effective_config()), _ensure_lists(gws.load_config()), gws)
 
 
 def cmd_init(ws: Workspace, args) -> int:
@@ -137,7 +144,12 @@ def cmd_init(ws: Workspace, args) -> int:
     scopes, repo_cfg, glob_cfg, gws = _scope_ctx(ws)
     from .sources import LOOKBACK_DEFAULTS
     settings = cfgmod.resolve(ws)
-    print(f"bean workspace: {ws.dir}  (repo: {ws.repo})\n")
+    print(f"bean workspace: {ws.dir}  (repo: {ws.repo})")
+    if ws.repo_config_path:
+        shared = "present" if ws.repo_config_path.exists() else "not created yet"
+        print(f"shared config:  {ws.repo_config_path}  ({shared} — committed with the repo; tracked "
+              "refs + `settings` here apply to every clone; personal config below overrides it)")
+    print()
     any_connected = False
     for s in SOURCES:
         scope = scopes.get(s.key, "local")
@@ -353,6 +365,9 @@ def cmd_sync(ws: Workspace, args) -> int:
         print("✓ knowledge base is up to date." if not errors else "nothing synced.")
     else:
         print(f"✓ {changed} document(s) updated, {removed} removed — {chunks} chunk(s) embedded.")
+    if (changed or removed) and ws.is_cloud and ws.cloud.get("backend") == "git" \
+            and ws.cloud.get("role") == "writer":
+        print(f"  · index changed under {ws.repo_bean_dir} — commit it: git add .bean && git commit")
     return 1 if errors else 0
 
 
@@ -479,26 +494,50 @@ def cmd_config(ws: Workspace, args) -> int:
 
 # -- cloud ----------------------------------------------------------------------------------------
 def cmd_cloud(ws: Workspace, args) -> int:
-    """Turn this workspace's Lance catalog into a cloud-backed one. `init` writes the workspace as
-    the writer of a new (or empty) bucket and pushes whatever's already indexed locally up to it;
-    `connect` joins an existing bucket as a read-only consumer and pulls it down, no source
-    credentials required."""
+    """Put this workspace's Lance catalog on a shared remote. `init --backend s3` writes the
+    workspace as the writer of a new (or empty) bucket and pushes what's indexed up to it;
+    `init --backend git` puts the catalog inside the repo at .bean/catalog (git-lfs for data
+    files) so a plain `git clone` ships the index — consumers need no connect step at all.
+    `connect` joins an existing S3 bucket as a read-only consumer. `role writer|consumer` sets
+    this machine's role for the current repo (e.g. take over as the git-backend writer)."""
     from . import remote
     if args.action == "init":
+        if (args.backend or "s3") == "git":
+            try:
+                notes = remote.cloud_init_git(ws)
+            except RuntimeError as err:
+                print(f"✗ {err}", file=sys.stderr)
+                return 1
+            print(f"✓ git-backed catalog initialised at {ws.repo_bean_dir / 'catalog'} (role=writer here; "
+                  "clones are read-only consumers by default)")
+            for n in notes:
+                print(f"  · {n}")
+            return 0
         if not args.bucket:
-            print("Usage: bean cloud init --bucket NAME [--prefix P] [--region R]", file=sys.stderr)
+            print("Usage: bean cloud init --bucket NAME [--prefix P] [--region R] | --backend git",
+                  file=sys.stderr)
             return 2
         remote.cloud_init(ws, args.bucket, args.prefix or "", args.region or "")
         print(f"✓ cloud writer initialised: bucket={args.bucket} prefix={args.prefix or ''} role=writer")
         return 0
     if args.action == "connect":
         if not args.bucket:
-            print("Usage: bean cloud connect --bucket NAME [--prefix P] [--region R]", file=sys.stderr)
+            print("Usage: bean cloud connect --bucket NAME [--prefix P] [--region R]  "
+                  "(the git backend needs no connect — a clone already has the catalog)", file=sys.stderr)
             return 2
         remote.cloud_connect(ws, args.bucket, args.prefix or "", args.region or "")
         print(f"✓ cloud consumer connected: bucket={args.bucket} prefix={args.prefix or ''} role=consumer")
         return 0
-    print(f"Unknown cloud action {args.action!r}. Known actions: init, connect", file=sys.stderr)
+    if args.action == "role":
+        if args.value not in ("writer", "consumer"):
+            print("Usage: bean cloud role writer|consumer", file=sys.stderr)
+            return 2
+        config = ws.load_config()
+        config.setdefault("settings", {}).setdefault("cloud", {})["role"] = args.value
+        ws.save_config(config)
+        print(f"✓ this machine is now a cloud {args.value} for this repo")
+        return 0
+    print(f"Unknown cloud action {args.action!r}. Known actions: init, connect, role", file=sys.stderr)
     return 2
 
 
@@ -686,8 +725,11 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("value", nargs="?")
     p.set_defaults(fn=cmd_config)
 
-    p = sub.add_parser("cloud", help="make this workspace's catalog cloud-backed (S3)")
-    p.add_argument("action", choices=["init", "connect"])
+    p = sub.add_parser("cloud", help="put this workspace's catalog on a shared remote (S3 or in-repo git/lfs)")
+    p.add_argument("action", choices=["init", "connect", "role"])
+    p.add_argument("value", nargs="?", help="for `role`: writer|consumer")
+    p.add_argument("--backend", choices=["s3", "git"],
+                   help="init only: s3 (default) or git — catalog committed at .bean/catalog")
     p.add_argument("--bucket", help="S3 bucket name")
     p.add_argument("--prefix", help="key prefix under the bucket (default: none/root)")
     p.add_argument("--region", help="AWS region")

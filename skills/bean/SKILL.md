@@ -1,6 +1,6 @@
 ---
 name: bean
-description: Search the user's connected knowledge base — Slack, Google Drive, GitHub, Confluence, Jira, Zendesk, Salesforce, HubSpot, Microsoft 365, Discord, and local files (including PDFs) — with local hybrid (semantic + keyword) retrieval. Use when the user asks a question that their work docs/messages would answer, wants to connect or sync a source, or types /bean. Also for "what's in my docs about X", "what did we decide in #channel", or reconstructing context across their tools.
+description: Search the user's connected knowledge base — git commit history, Slack, Google Drive, GitHub, Confluence, Jira, Zendesk, Salesforce, HubSpot, Microsoft 365, Discord, and local files (including PDFs) — with local hybrid (semantic + keyword) retrieval. Use when the user asks a question that their work docs/messages/commits would answer, wants to connect or sync a source, or types /bean. Also for "what's in my docs about X", "what did we decide in #channel", "when/why did we change Y", or reconstructing context across their tools.
 version: 0.1.0
 user-invocable: true
 argument-hint: init | sync | status | plugins | config | <question>
@@ -9,9 +9,11 @@ allowed-tools: Bash
 
 # bean — local knowledge retrieval
 
-You are driving **bean**, a local hybrid search index over the user's Slack, Google Drive, GitHub,
-Confluence, Jira and other connected sources (10 connectors) plus local files. It runs entirely on
-this machine (their credentials, DuckDB + Lance under `~/.bean/<repo>-<hash>/`). **You** run every bean command yourself via Bash — as:
+You are driving **bean**, a local hybrid search index over the current repo's git commit history
+and the user's Slack, Google Drive, GitHub, Confluence, Jira and other connected sources (11
+connectors) plus local files. It runs entirely on this machine (their credentials, DuckDB + Lance
+under `~/.bean/<repo>-<hash>/`); a repo may also carry a committed `.bean/` folder with the team's
+shared sources — and, under the git storage backend, the index itself. **You** run every bean command yourself via Bash — as:
 
 ```
 python3 ${CLAUDE_PLUGIN_ROOT}/scripts/bean.py <subcommand> …
@@ -32,8 +34,10 @@ treat their message as the question). Empty or a plain question → the retrieva
 
 bean gives you a **toolbox of retrieval commands**. Don't just run one search — decide what
 context the question needs, then compose calls. Every command prints human-readable text — read its
-output. All accept `--source <connector>` to scope by connector — one of `slack`, `gdocs`, `github`,
-`confluence`, `jira`, `zendesk`, `salesforce`, `hubspot`, `microsoft`, `discord`, `localfiles`.
+output. All accept `--source <connector>` to scope by connector — one of `git`, `slack`, `gdocs`,
+`github`, `confluence`, `jira`, `zendesk`, `salesforce`, `hubspot`, `microsoft`, `discord`,
+`localfiles`. `git` is the repo's commit history (no auth, indexed by default) — `search --source
+git`, `recent --source git --author ada`, and `--since` answer "when/why did we change X".
 
 **Previews are truncated by default** (5 lines × ~110 chars per hit) so a list stays scannable —
 **don't conclude from a preview alone**. `search`/`recent`/`related` take **`--full [N]`** to print
@@ -90,9 +94,10 @@ Setup is a conversation; the CLI never prompts. Run `bean.py init` for a detaile
 one entry per source with its connection status, scope, credential file path + fields, config file
 path + the config list names that hold tracked refs (e.g. `slack.[channels]`, `github.[repos]`),
 whether it indexes-everything-when-connected, and (for Slack/Discord/Google Drive) the first-sync
-lookback. bean ships **10 core connectors** — Slack, Google Drive, GitHub, Confluence,
-Jira, Zendesk, Salesforce, HubSpot, Microsoft 365, Discord — plus local files, always on. Read
-`bean.py init`'s output and act on it; don't memorize the list.
+lookback. bean ships **11 core connectors** — Git history (the current repo, no auth, on by
+default), Slack, Google Drive, GitHub, Confluence, Jira, Zendesk, Salesforce, HubSpot,
+Microsoft 365, Discord — plus local files, always on. Read `bean.py init`'s output and act on it;
+don't memorize the list.
 
 **Each connector has a guided `/connect-<name>` setup skill** (`connect-slack`, `connect-github`,
 …) that walks scope (global/local) and every auth option for that source. When setting a source up,
@@ -164,9 +169,22 @@ ask. Still answer their question from the current index; just flag that it may b
 
 There is no routing command. Write the ref directly into the source's config file, under the config
 list names `bean.py init` prints (e.g. `slack.[channels]`, `github.[repos]`), then suggest
-`/bean sync`.
+`/bean sync`. Refs meant for the **whole team** go into the repo's committed `.bean/config.json`
+instead (same shape; `bean.py init` prints its path) — everyone who clones inherits them, and each
+person authenticates with their own credentials. Personal config overrides the committed file.
 
-## `plugins` — connectors beyond the core 10
+## Team sharing: `.bean/` + storage backends
+
+- A committed `.bean/config.json` declares team sources + `settings`. A clone that hasn't authed a
+  declared source is skipped with a nudge at sync — not an error. Credentials never enter the repo.
+- **Storage backends** for the index: local (default, `~/.bean`), **git** (`bean.py cloud init
+  --backend git` — catalog committed at `.bean/catalog`, data files on git-lfs; teammates get the
+  index by `git clone`, zero steps), or **s3** (`cloud init --bucket …` / `cloud connect`).
+- Shared backends have **one writer** (clones default to read-only consumer; `bean.py cloud role
+  writer` takes over). After a git-backend sync, remind the user to commit `.bean/` — sync prints
+  the nudge; committing is the user's move, like sync itself.
+
+## `plugins` — connectors beyond the core set
 
 - `bean.py plugins list` — the core set plus any drop-in plugin files loaded from `~/.bean/plugins/`.
 - **A source with no bundled connector?** Author one: copy

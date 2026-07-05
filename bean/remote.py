@@ -18,10 +18,14 @@ _MANIFEST_GLOB = f"*{_MANIFEST_MARKER}*"
 
 
 def pull(ws) -> None:
-    """Fast-forward `ws`'s local replica from its remote. No-op in local (non-cloud) mode."""
+    """Fast-forward `ws`'s local replica from its remote. No-op in local (non-cloud) mode, and
+    for a directory remote that doesn't exist yet (a git-backend repo before its first push)."""
     if not ws.is_cloud:
         return
-    _copy_new(ws.remote_uri, ws.replica_dir)
+    uri = ws.remote_uri
+    if not str(uri).startswith("s3://") and not Path(uri).is_dir():
+        return
+    _copy_new(uri, ws.replica_dir)
 
 
 def auto_pull(ws, *, min_interval: int = 60, now: float | None = None) -> bool:
@@ -75,6 +79,44 @@ def cloud_init(ws, bucket: str, prefix: str, region: str) -> None:
     shared catalog's starting content instead of an empty bucket."""
     _write_cloud_config(ws, "writer", bucket, prefix, region)
     push(ws)
+
+
+# LFS-track only the immutable data/fragment files (the vectors — the big payload). Manifests
+# under _versions/ and transaction files stay in plain git: many, small, and diff-friendly.
+_GITATTRIBUTES = "catalog/**/data/** filter=lfs diff=lfs merge=lfs -text\n"
+
+
+def cloud_init_git(ws) -> list[str]:
+    """Turn `ws` into the writer of an in-repo, git-versioned catalog (the git storage backend).
+    The shared side — `settings.cloud` with backend=git and a safe role=consumer default so every
+    fresh clone is read-only — goes into the committed `.bean/config.json`; this machine's
+    role=writer override goes into the personal workspace config (personal beats committed in
+    `config.resolve`). Writes `.bean/.gitattributes` routing data files to git-lfs, then pushes
+    the local catalog into `.bean/catalog`. Returns human follow-up notes (lfs missing, files to
+    commit) for the CLI to print — committing is always the user's move, never bean's."""
+    if ws.repo_bean_dir is None:
+        raise RuntimeError("the git backend needs a repo — run bean inside a git repository")
+    repo_cfg = ws.load_repo_config()
+    repo_cfg.setdefault("settings", {})["cloud"] = {"enabled": True, "backend": "git",
+                                                    "role": "consumer"}
+    ws.save_repo_config(repo_cfg)
+    config = ws.load_config()
+    config.setdefault("settings", {}).setdefault("cloud", {})["role"] = "writer"
+    ws.save_config(config)
+    attrs = ws.repo_bean_dir / ".gitattributes"
+    if not attrs.exists():
+        attrs.write_text(_GITATTRIBUTES)
+    push(ws)
+    notes = [f"commit the shared index: git add {ws.repo_bean_dir.name} && git commit",
+             "keep ONE writer (you, or a CI job) — Lance catalog versions don't merge across branches"]
+    try:
+        has_lfs = subprocess.run(["git", "lfs", "version"], capture_output=True).returncode == 0
+    except OSError:
+        has_lfs = False
+    if not has_lfs:
+        notes.insert(0, "⚠ git-lfs not found — install it and run `git lfs install` before "
+                        "committing, or the data files land in plain git")
+    return notes
 
 
 def cloud_connect(ws, bucket: str, prefix: str, region: str) -> None:

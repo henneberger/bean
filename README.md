@@ -1,18 +1,19 @@
+bean is a local search for your project, packaged as a Claude Code plugin.
+
 # bean
 
-bean is a local hybrid search over your work knowledge, packaged as a Claude
-Code plugin.
-
-You already pay for a Claude plan, so why pay again for API calls? Or hand your docs to yet another
-LLM-wrapper SaaS? Not ready to drop $100k on search? bean has no server: it pulls with your own
-credentials, embeds on your machine, and stores everything locally.
+bean gives Claude Code access to your issues, wiki, and chat so anyone using your project has unified
+access to your project knowledge. Additionally, bean has no server: it pulls with your own
+credentials, embeds on your machine, and stores everything locally. Embeddings can be stored
+locally, committed to the repo via git (lfs), or shared over s3 — a committed `.bean/` folder
+carries the team's sources and settings with the code, and every repo's commit history is
+searchable out of the box.
 
 ![bean in Claude Code — an incident thread in Slack, traced to the culprit code, with every hit cited](assets/demo.png)
 
 ## Install
 
-In Claude Code, add this repo as a plugin marketplace, then install the plugin. Run the two
-commands one at a time (the marketplace add takes a full clone URL, not an `owner/repo` shorthand):
+In Claude Code, add this repo as a plugin marketplace, then install the plugin.
 
 ```bash
 /plugin marketplace add https://github.com/henneberger/bean.git
@@ -53,10 +54,11 @@ Under the hood these map to `search` (with `--variant`, `--author`, `--since`, `
 
 ## Connectors
 
-bean ships **10 core connectors**, always on:
+bean ships **11 core connectors**, always on:
 
 | Source | Auth | What it indexes |
 |--------|------|-----------------|
+| **Git history** | none | the current repo's commit messages — one document per commit, author + date attributed, searchable with `--author`/`--since`; on by default |
 | **Slack** | user token (`xoxp-…`) | channels — one document per thread, one per standalone message |
 | **Google Drive** | gcloud sign-in | Docs, PDFs (extracted), and comments (each comment its own author-attributed entry); whole Drive folders |
 | **GitHub** | personal access token | issues and pull requests (body + comments) |
@@ -76,7 +78,7 @@ can set up without an admin: Atlassian Cloud tokens or Server PATs, Microsoft de
 
 **Need a source bean doesn't have?** Author a connector — a single offline-testable module dropped
 into `~/.bean/plugins/`, live with no core edits. Copy [`docs/connector-template.py`](docs/connector-template.py)
-(contract + helpers inline) to start; the 10 core connectors in
+(contract + helpers inline) to start; the core connectors in
 [`bean/connectors/`](bean/connectors/) are worked examples across every API shape. `bean plugins list` shows what's loaded.
 
 ### Global vs local scope
@@ -98,6 +100,38 @@ each source's config path and list names.
 
 Changing scope moves the connector's config and purges its old index, so run `bean sync` afterward.
 
+## Drop it into your repo: the `.bean/` folder
+
+bean travels with the repo. A committed `.bean/config.json` (same shape as the personal config)
+declares the team's sources and settings — anyone who clones the repo inherits them; each person
+authenticates with their **own** credentials (which never enter the repo). Personal config overrides
+the committed file; tracked-ref lists union.
+
+```jsonc
+// .bean/config.json — committed
+{
+  "github": {"repos": ["acme/app"]},
+  "slack": {"channels": ["#eng"]},
+  "settings": {"cloud": {"enabled": true, "backend": "git", "role": "consumer"}}
+}
+```
+
+A clone that hasn't authed a declared source isn't an error — `bean sync` skips it with a nudge to
+run `bean auth <source>`. Git history needs no auth at all, so every clone gets commit search for free.
+
+### Where the embeddings live
+
+| Backend | Set up with | Teammates get the index by | Notes |
+|---------|-------------|---------------------------|-------|
+| **local** (default) | nothing | syncing themselves | index stays in `~/.bean/<repo>-<hash>/` |
+| **git (lfs)** | `bean cloud init --backend git` | `git clone` — zero steps | catalog committed at `.bean/catalog`; data files on git-lfs (`.bean/.gitattributes` written for you), manifests in plain git; commit `.bean/` after each sync |
+| **s3** | `bean cloud init --bucket …` / `connect` | `bean cloud connect` + `bean pull` | needs the `aws` CLI and bucket access |
+
+One rule for the shared backends: **one writer** (a maintainer or CI job runs `bean sync` and, for
+git, commits `.bean/`) — Lance catalog versions don't merge across branches. Clones default to
+read-only consumer; take over with `bean cloud role writer`. Deleted documents' vectors persist in
+git history under the git backend — treat a committed index as append-only.
+
 ## Hybrid search
 
 Every query runs two rankings and fuses them with **weighted** reciprocal rank fusion:
@@ -117,9 +151,10 @@ globally with `config set search.hybrid false`.
 
 ## Configuration
 
-Settings resolve in three layers, later wins: built-in defaults ← global `~/.bean/config.json` ←
-a repo's own `settings` block. Nothing is an environment variable; secrets never live here (tokens
-stay in `~/.bean/credentials/`, mode 0600).
+Settings resolve in four layers, later wins: built-in defaults ← global `~/.bean/config.json` ←
+the repo's committed `.bean/config.json` `settings` block ← the personal workspace `settings`
+block. Nothing is an environment variable; secrets never live here (tokens stay in
+`~/.bean/credentials/`, mode 0600).
 
 ```bash
 /bean config list                              # the full resolved config
@@ -162,7 +197,7 @@ configured.
 (e.g. `bean config set slack.chunking.lines 15` or `gdocs.chunking.max_chars 1500`). A source's
 effective chunking is the global `chunking` block with its own `chunking` sub-block merged on top.
 Slack ships smaller defaults (`slack.chunking` = lines 15, overlap 3, max_chars 1000, min_chars 20)
-since chat is short.
+since chat is short; git commit messages get the same treatment (`git.chunking`, min_chars 10).
 
 `lookback_days` is a one-time choice: `/bean init` prompts for it per source and it bounds only the
 **first** sync's backfill. After that each source tracks a cursor and pulls just what's new, so you
@@ -208,34 +243,3 @@ running overnight**. A few hundred pages is an evening. A few thousand is a coup
 resumable, so an interrupted run picks up where it left off. (One-time downloads on first use,
 excluded above: the built-in `jinaai/jina-embeddings-v5-text-nano` weights ~480 MB, and the OCR model ~6 GB the
 first time you enable it.)
-
-## How it works
-
-- **Sources.** Each connector has a cheap change signal (a revision id, an `updated_at`, a version
-  number, or a file mtime), with the content hash as the final authority. `sync` re-embeds only
-  what changed; deletions revoke their vectors. Sync is resumable: the embed phase
-  checkpoints per document (oldest first), so an interrupted run picks up where it left off without
-  re-embedding what's done or skipping anything.
-- **Storage.** One DuckDB catalog per workspace holds document snapshots, revision history, sync
-  cursors, and the relationship edges. A Lance table alongside it holds the chunks (text + vectors)
-  as the single copy. Nothing mirrors that chunk data: keyword search, neighbours, and section-merge
-  run as DuckDB SQL **directly over the Lance dataset** (register + query). DuckDB stays the
-  relational engine; the chunks live once. Workspaces live at `~/.bean/<repo-name>-<hash>/`
-  (global connectors share `~/.bean/_global/`). Credentials follow scope: a **global** connector's
-  is shared at `~/.bean/credentials/`. A **local** connector's lives in that repo's workspace (so a
-  different GitHub token per project works), with the shared dir as a fallback. All mode 0600,
-  never inside a repo. `bean sql "SELECT …"` runs read-only queries (SELECT/WITH) straight over this
-  store (tables `documents`, `edges`, `state`, and the Lance `_chunks` dataset) for structured
-  questions like counts by author. `bean sql` with no query prints the schema; `--global` targets
-  the shared store.
-- **Auth.** Google rides on gcloud's own pre-verified OAuth client, so nobody sets up a GCP
-  project. Slack and GitHub take a token you paste once.
-
-## Limits worth knowing
-
-- Google's Markdown export drops images, drawings, and smart chips; docs that refuse Markdown fall
-  back to plain text.
-- After the first sync, Slack/Discord continue from a per-channel cursor and re-render the current
-  week, so edits to that week land but older-week edits don't (by design). `sync --rebuild`
-  re-fetches everything within `--since` days (default 90).
-- GitHub syncs issues/PRs incrementally by `updated_at`; a removed repo prunes everything under it.

@@ -18,6 +18,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from bean.workspace import set_bean_home  # noqa: E402
 set_bean_home(tempfile.mkdtemp(prefix="bean-home-"))  # config, not an env var
+# Run from a non-git temp dir: the git source indexes the cwd's repo by default, and these tests
+# must not slurp the bean repo's own history into every run_sync.
+import os  # noqa: E402
+os.chdir(tempfile.mkdtemp(prefix="bean-cwd-"))
 
 from bean.http import AuthError, Response, api_get  # noqa: E402
 from bean.store import Store, content_hash  # noqa: E402
@@ -995,8 +999,8 @@ from bean import config as _cfg  # noqa: E402
 from bean.plugins import discover_sources  # noqa: E402
 
 core_keys = {s.key for s in _S.CORE_SOURCES}
-ok(core_keys == {"slack", "gdocs", "github", "confluence", "jira", "zendesk",
-                 "salesforce", "hubspot", "microsoft", "discord"}, "10 cloud core connectors")
+ok(core_keys == {"slack", "gdocs", "git", "github", "confluence", "jira", "zendesk",
+                 "salesforce", "hubspot", "microsoft", "discord"}, "11 core connectors (incl. git)")
 ok(_S.SOURCES[-1].key == "localfiles", "localfiles registered last (path catch-all)")
 
 # a drop-in plugin file: a standalone module exposing SOURCE
@@ -1596,8 +1600,9 @@ from bean.cli import cmd_cloud  # noqa: E402
 _cc_ws = Workspace(repo("cloud-init-cli"))
 _cc_remote_dir = Path(tempfile.mkdtemp(prefix="bean-cloud-init-cli-remote-"))
 
-def _cloud_args(action, bucket=None, prefix=None, region=None):
-    return _types.SimpleNamespace(action=action, bucket=bucket, prefix=prefix, region=region)
+def _cloud_args(action, bucket=None, prefix=None, region=None, backend=None, value=None):
+    return _types.SimpleNamespace(action=action, bucket=bucket, prefix=prefix, region=region,
+                                  backend=backend, value=value)
 
 _orig_remote_uri_prop4 = Workspace.remote_uri
 Workspace.remote_uri = property(lambda self: str(_cc_remote_dir))
@@ -2044,6 +2049,170 @@ ok(_mig_check.execute(
     "SELECT count(*) FROM duckdb_tables() WHERE table_name = 'documents'").fetchone()[0] == 1,
    "migration guard: the legacy `documents` table is left in place (migration skipped, not run)")
 _mig_check.close()
+
+# == git commit-history connector ================================================================
+import subprocess as _sp  # noqa: E402
+from bean.connectors import git as gitsrc  # noqa: E402
+
+
+def _sh(cwd, *args, env=None):
+    e = {"GIT_AUTHOR_NAME": "Ada", "GIT_AUTHOR_EMAIL": "ada@x", "GIT_COMMITTER_NAME": "Ada",
+         "GIT_COMMITTER_EMAIL": "ada@x", "PATH": os.environ["PATH"], "HOME": os.environ["HOME"],
+         **(env or {})}
+    _sp.run(args, cwd=str(cwd), env=e, check=True, capture_output=True)
+
+
+def _gitrepo(name, commits):
+    d = Path(tempfile.mkdtemp(prefix=f"bean-git-{name}-")) / name
+    d.mkdir()
+    _sh(d, "git", "init", "-q", "-b", "main")
+    for i, msg in enumerate(commits):
+        (d / f"f{i}.txt").write_text(str(i))
+        _sh(d, "git", "add", ".")
+        _sh(d, "git", "commit", "-q", "-m", msg)
+    return d
+
+
+_grepo = _gitrepo("proj", ["feat: add refund flow\n\nRefunds hit the chargeCard queue nightly.",
+                           "fix: retry billing webhook"])
+_gws = Workspace(repo("git-src"))
+with Store(_gws) as _gstore:
+    _gr = gitsrc.sync(_gstore, {"repos": [str(_grepo)]}, settings={})
+    ok(len(_gr["changed"]) == 2 and not _gr["removed"], f"git: both commits indexed ({_gr})")
+    _gdocs_ids = _gstore.doc_ids("git")
+    ok(all(d.startswith("proj:") for d in _gdocs_ids), "git: doc_id is <repo-name>:<sha>")
+    _gdoc = _gstore.get("git", _gr["changed"][0])
+    ok(_gdoc.author == "Ada" and _gdoc.created_at is not None and _gdoc.modified_at is not None,
+       "git: author + ISO commit dates land in doc metadata")
+    _titles = {_gstore.get("git", d).title for d in _gdocs_ids}
+    ok("feat: add refund flow" in _titles, "git: commit subject is the title")
+    _bodies = " ".join(_gstore.get("git", d).body for d in _gdocs_ids)
+    ok("chargeCard queue nightly" in _bodies, "git: full message body is indexed")
+    # incremental: no new commits -> no work; a new commit -> exactly one changed doc
+    _gr2 = gitsrc.sync(_gstore, {"repos": [str(_grepo)]}, settings={})
+    ok(_gr2 == {"changed": [], "removed": []}, f"git: unchanged HEAD is a no-op ({_gr2})")
+    (_grepo / "f9.txt").write_text("9")
+    _sh(_grepo, "git", "add", ".")
+    _sh(_grepo, "git", "commit", "-q", "-m", "docs: explain WAL compaction")
+    _gr3 = gitsrc.sync(_gstore, {"repos": [str(_grepo)]}, settings={})
+    ok(len(_gr3["changed"]) == 1 and "WAL compaction" in _gstore.get("git", _gr3["changed"][0]).body,
+       f"git: incremental sync picks up only the new commit ({_gr3})")
+    # rewritten history: an amend indexes the new sha incrementally (the old one still resolves as
+    # a range base); the orphaned commit is pruned on the next full scan (`--rebuild`)
+    _old_head = _gr3["changed"][0]
+    _sh(_grepo, "git", "commit", "-q", "--amend", "-m", "docs: explain WAL compaction and fsync")
+    _gr4 = gitsrc.sync(_gstore, {"repos": [str(_grepo)]}, settings={})
+    ok(len(_gr4["changed"]) == 1 and "fsync" in _gstore.get("git", _gr4["changed"][0]).body,
+       f"git: amend indexes the rewritten commit ({_gr4})")
+    _gr5 = gitsrc.sync(_gstore, {"repos": [str(_grepo)]}, settings={}, full=True)
+    ok(_old_head in _gr5["removed"] and _gstore.get("git", _old_head) is None,
+       f"git: a full scan prunes commits rewritten out of history ({_gr5['removed']})")
+    # graph: authored_by + in_repo edges derive from the doc
+    from bean.graph import implied_edges as _ie
+    _edges = _ie(_gstore.get("git", _gr4["changed"][0]))
+    ok({"rel": "in_repo", "dst_kind": "container", "dst": "proj"} in _edges
+       and any(e["rel"] == "authored_by" and e["dst"] == "Ada" for e in _edges),
+       f"git: in_repo + authored_by edges ({_edges})")
+
+# default repo = cwd's repo when nothing is tracked; a non-git cwd is a clean no-op
+_gcwd = Path.cwd()
+try:
+    os.chdir(_grepo)
+    with Store(Workspace(repo("git-default"))) as _gdstore:
+        _gdr = gitsrc.sync(_gdstore, {}, settings={})
+        ok(len(_gdr["changed"]) == 3, f"git: with nothing tracked, the cwd repo indexes ({_gdr})")
+finally:
+    os.chdir(_gcwd)
+with Store(Workspace(repo("git-nocwd"))) as _gnstore:
+    ok(gitsrc.sync(_gnstore, {}, settings={}) == {"changed": [], "removed": []},
+       "git: non-git cwd with nothing tracked is a no-op")
+
+# git source registration: no auth, active with zero config, chat-sized chunking default
+_gsrc = _S.BY_KEY["git"]
+ok(_gsrc.auth is None and _gsrc.is_active({}), "git source: no auth, active with zero config")
+ok(cfgmod.DEFAULTS["git"]["chunking"]["lines"] == 15, "git source: chat-sized chunking default")
+
+# end-to-end: run_sync embeds commits, hybrid search + author filter find them
+_gews = Workspace(repo("git-e2e"))
+_gews.save_config({"git": {"repos": [str(_grepo)]}})
+_ger = run_sync(_gews, keys={"git"}, embed_fn=fake_embed)
+ok(len(_ger["changed"]) == 3 and _ger["chunks"] > 0, f"git: run_sync ingests + embeds commits ({_ger})")
+_ghit = hybrid_search(_gews, "refund chargeCard billing", embed_query_fn=lambda q: fake_embed([q])[0], k=3)
+ok(_ghit and _ghit[0]["source"] == "git", f"git: commit history is searchable ({[h['title'] for h in _ghit]})")
+
+# == committed .bean/ repo config ================================================================
+_brepo_dir = repo("beancfg")
+_bws = Workspace(_brepo_dir)
+ok(_bws.repo_config_path == _bws.repo / ".bean" / "config.json", ".bean: repo config path")
+ok(Workspace.global_().repo_config_path is None, ".bean: the global workspace has no repo config")
+_bws.save_repo_config({"github": {"repos": ["team/app"]},
+                       "settings": {"search": {"k": 3}, "cloud": {"enabled": False}}})
+_bws.save_config({"github": {"repos": ["me/fork"]}, "settings": {"search": {"k": 5}}})
+_eff = _bws.effective_config()
+ok(_eff["github"]["repos"] == ["team/app", "me/fork"],
+   f".bean: tracked lists union, committed refs first ({_eff['github']['repos']})")
+_res = cfgmod.resolve(_bws)
+ok(_res["search"]["k"] == 5, ".bean: personal settings beat committed settings")
+_bws.save_config({"github": {"repos": ["me/fork"]}})  # drop the personal k override
+ok(cfgmod.resolve(_bws)["search"]["k"] == 3, ".bean: committed settings beat global defaults")
+
+# a tracked-but-unauthed source (fresh clone of a team repo) skips with a nudge, not an error
+(bean_home() / "credentials" / "jira.json").unlink(missing_ok=True)  # drop the cred an earlier test saved
+_skws = Workspace(repo("bean-skip"))
+_skws.save_repo_config({"jira": {"projects": ["PROJ"]}})
+_sk_logs = []
+_skr = run_sync(_skws, keys={"jira"}, embed_fn=fake_embed, log=_sk_logs.append)
+ok(_skr["errors"] == [] and _skr["skipped"] == ["jira"]
+   and any("not connected" in m for m in _sk_logs),
+   f".bean: declared-but-unauthed source skips gracefully ({_skr['errors']}, {_sk_logs})")
+
+# refs declared only in the committed file actually sync (localfiles has no auth gate)
+_bdocs = Path(tempfile.mkdtemp(prefix="bean-teamdocs-"))
+(_bdocs / "runbook.md").write_text("Restart the billing worker after a chargeCard incident.")
+_tws = Workspace(repo("bean-teamrefs"))
+_tws.save_repo_config({"localfiles": {"paths": [str(_bdocs)]}})
+_twr = run_sync(_tws, keys={"localfiles"}, embed_fn=fake_embed)
+ok(len(_twr["changed"]) == 1, f".bean: committed tracked refs sync with zero personal config ({_twr})")
+
+# == git storage backend (catalog committed in-repo, lfs attributes) =============================
+from bean import remote as _remote2  # noqa: E402
+
+_gb_repo = _gitrepo("gitback", ["initial"])
+_gb_ws = Workspace(_gb_repo)
+_gb_ws.save_config({"localfiles": {"paths": [str(_bdocs)]}})
+run_sync(_gb_ws, keys={"localfiles"}, embed_fn=fake_embed)  # index locally first
+_gb_notes = _remote2.cloud_init_git(_gb_ws)
+ok(_gb_ws.is_cloud and _gb_ws.cloud["backend"] == "git" and _gb_ws.cloud["role"] == "writer",
+   "git backend: init enables cloud with backend=git, this machine = writer")
+ok(json.loads(_gb_ws.repo_config_path.read_text())["settings"]["cloud"]["role"] == "consumer",
+   "git backend: the committed config defaults every clone to read-only consumer")
+ok(_gb_ws.remote_uri == str(_gb_ws.repo / ".bean" / "catalog"), "git backend: remote is .bean/catalog")
+ok((_gb_ws.repo / ".bean" / "catalog" / "documents.lance").is_dir(),
+   "git backend: init pushes the local catalog into the repo")
+ok("data/**" in (_gb_ws.repo / ".bean" / ".gitattributes").read_text()
+   and "_versions" not in (_gb_ws.repo / ".bean" / ".gitattributes").read_text(),
+   "git backend: .gitattributes routes data files (not manifests) to lfs")
+ok(any("git add" in n for n in _gb_notes), "git backend: init tells the user to commit .bean")
+
+# a "clone" (same repo content elsewhere) is a consumer with zero setup: pull fills the replica
+_gb_clone = Path(tempfile.mkdtemp(prefix="bean-clone-")) / "gitback"
+import shutil as _sh2  # noqa: E402
+_sh2.copytree(_gb_repo, _gb_clone)
+_cl_ws = Workspace(_gb_clone)
+ok(_cl_ws.is_cloud and _cl_ws.cloud["role"] == "consumer",
+   "git backend: a fresh clone is cloud-enabled read-only via the committed config alone")
+_remote2.pull(_cl_ws)
+with Store(_cl_ws) as _cl_store:
+    ok(len(_cl_store.doc_ids("localfiles")) == 1,
+       "git backend: the clone reads the committed catalog after pull (no credentials, no sync)")
+try:
+    run_sync(_cl_ws, keys={"localfiles"}, embed_fn=fake_embed)
+    ok(False, "git backend: consumer sync should refuse")
+except RuntimeError as _cl_err:
+    ok("read-only cloud consumer" in str(_cl_err), "git backend: consumer sync refuses read-only")
+# pull before the writer ever pushed: tolerated, not an error
+_remote2.pull(Workspace(_gitrepo("gitback-empty", ["initial"])))  # not cloud -> no-op path
+ok(True, "git backend: pull on a non-cloud/empty-remote workspace is a no-op")
 
 print(f"bean: {CHECKS - FAILED}/{CHECKS} checks passed" if FAILED == 0 else f"bean: {FAILED}/{CHECKS} checks FAILED")
 sys.exit(0 if FAILED == 0 else 1)

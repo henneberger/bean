@@ -20,6 +20,7 @@ def _before(sep: str):
 # encodes a meaningful container appear; everything else contributes just the authored_by edge.
 _CONTAINER: dict = {
     "github": ("in_repo", lambda d: re.split(r"[#:]", d, 1)[0]),      # owner/repo#12 / owner/repo:path
+    "git": ("in_repo", _before(":")),                                # repo-name:<sha>
     "jira": ("in_project", lambda d: d.rsplit("-", 1)[0]),           # PROJ-123 -> PROJ
     "slack": ("in_channel", _before("/")),                           # channel/<ts>
     "discord": ("in_channel", _before("/")),                         # channel/<message-id>

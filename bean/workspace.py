@@ -1,8 +1,13 @@
-"""Per-repo workspaces under ~/.bean.
+"""Per-repo workspaces under ~/.bean, plus the committed `.bean/` folder inside the repo.
 
-Every repo gets its own folder — <repo-name>-<hash-of-path>/ — holding that repo's config,
-DuckDB catalog, Lance vector store, and (for local connectors) its own credentials. Nothing is
-ever written inside the repo itself.
+Every repo gets its own folder — <repo-name>-<hash-of-path>/ — holding that repo's personal
+config, DuckDB catalog, Lance vector store, and (for local connectors) its own credentials.
+A repo may also carry a **committed** `.bean/` folder: `.bean/config.json` holds the shareable
+side (which sources the repo tracks + team `settings`, e.g. the storage backend) so anyone who
+clones the repo inherits them; `effective_config()` merges it under the personal workspace
+config (lists union, personal scalars win). Secrets never go in `.bean/` — credentials always
+stay under ~/.bean. bean only writes inside the repo on explicit commands (`bean cloud init
+--backend git`) or when asked to share config; day-to-day sync state stays out of the repo.
 
 Credentials resolve by scope, mirroring connectors: a **global** connector's credential is shared
 at ~/.bean/credentials/ (one Slack, one personal Google); a **local** connector's credential lives
@@ -100,14 +105,19 @@ class Workspace:
 
     @property
     def is_cloud(self) -> bool:
-        return bool(self.cloud.get("enabled"))
+        """Cloud-enabled AND the remote actually resolves (a git-backend workspace with no repo,
+        or an s3 one with no bucket, is not usably cloud)."""
+        return bool(self.cloud.get("enabled")) and self.remote_uri is not None
 
     @property
     def remote_uri(self) -> str | None:
-        """`s3://bucket/prefix` for this workspace's catalog, or None when not cloud-enabled or no
-        bucket is configured."""
-        if not self.is_cloud:
+        """The authoritative catalog's location: `s3://bucket/prefix` for the s3 backend, the
+        repo's committed `.bean/catalog` dir for the git backend, or None when not cloud-enabled
+        (or the backend can't resolve — no bucket / no repo)."""
+        if not self.cloud.get("enabled"):
             return None
+        if self.cloud.get("backend") == "git":
+            return str(self.repo_bean_dir / "catalog") if self.repo_bean_dir else None
         bucket = self.cloud.get("bucket") or ""
         if not bucket:
             return None
@@ -128,6 +138,52 @@ class Workspace:
 
     def save_config(self, config: dict) -> None:
         self.config_path.write_text(json.dumps(config, indent=2) + "\n")
+
+    # -- committed repo config: the shareable side, versioned with the code ---------------------
+    @property
+    def repo_bean_dir(self) -> Path | None:
+        """`<repo>/.bean` — the committed folder (shared config, and the catalog under the git
+        storage backend). None for the global workspace."""
+        return (self.repo / ".bean") if self.repo else None
+
+    @property
+    def repo_config_path(self) -> Path | None:
+        d = self.repo_bean_dir
+        return (d / "config.json") if d else None
+
+    def load_repo_config(self) -> dict:
+        path = self.repo_config_path
+        if path is None:
+            return {}
+        try:
+            return json.loads(path.read_text())
+        except (OSError, ValueError):
+            return {}
+
+    def save_repo_config(self, config: dict) -> None:
+        self.repo_bean_dir.mkdir(parents=True, exist_ok=True)
+        self.repo_config_path.write_text(json.dumps(config, indent=2) + "\n")
+
+    def effective_config(self) -> dict:
+        """The config sync/status read: the repo's committed `.bean/config.json` with this
+        machine's personal workspace config merged on top — dicts merge recursively, tracked-ref
+        lists union (committed refs first), personal scalars win. Writes still go to
+        `save_config` (personal) or `save_repo_config` (shared) — never through this view."""
+        repo_cfg = self.load_repo_config()
+        return _overlay(repo_cfg, self.load_config()) if repo_cfg else self.load_config()
+
+
+def _overlay(base, over):
+    """Merge `over` onto `base`: dicts recurse, lists union (base order first), scalars from
+    `over` win."""
+    if isinstance(base, dict) and isinstance(over, dict):
+        out = dict(base)
+        for k, v in over.items():
+            out[k] = _overlay(base[k], v) if k in base else v
+        return out
+    if isinstance(base, list) and isinstance(over, list):
+        return base + [v for v in over if v not in base]
+    return over
 
 
 # -- connector scope (per user): which sources sync globally vs per-repo -----------------------
