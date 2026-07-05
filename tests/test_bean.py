@@ -1734,5 +1734,91 @@ with _ctx.redirect_stdout(_st_off_buf):
     cmd_status(_pl_off_ws, _types.SimpleNamespace())
 ok("cloud:" not in _st_off_buf.getvalue(), "cmd_status omits the cloud section for a non-cloud workspace")
 
+# -- Task 3.4: guarded auto-pull before cloud read commands --------------------------------------
+# A consumer should see fresh data without a manual `bean pull`, but back-to-back reads within
+# `min_interval` seconds shouldn't each re-pull. Injected `now` keeps this deterministic/offline.
+_ap_remote_dir = Path(tempfile.mkdtemp(prefix="bean-autopull-remote-"))
+Catalog(_ap_remote_dir).upsert_documents([{
+    "source": "gdocs", "doc_id": "ap1", "title": "T", "url": "u", "revision_id": "rev1",
+    "hash": "h1", "body": "auto-pull body 1", "created_at": None, "modified_at": None,
+    "author": "Ada", "mime": None, "fetched_at": None,
+}])
+_ap_ws = Workspace(repo("auto-pull"))
+_ap_ws.save_config({"settings": {"cloud": {
+    "enabled": True, "role": "consumer", "bucket": "b", "prefix": "p", "region": "us-east-1"}}})
+
+_orig_remote_uri_prop8 = Workspace.remote_uri
+Workspace.remote_uri = property(lambda self: str(_ap_remote_dir))
+try:
+    # First call: no prior last_pull -> pulls, records last_pull=1000.
+    _ap_r1 = _remote.auto_pull(_ap_ws, min_interval=60, now=1000)
+    ok(_ap_r1 is True, "auto_pull: first call (no prior last_pull) pulls and returns True")
+    _ap_con1 = Catalog(_ap_ws.catalog_dir).duck()
+    ok(_ap_con1.execute("SELECT count(*) FROM documents").fetchone()[0] == 1,
+       "auto_pull: first call landed the remote's doc in the local replica")
+    _ap_con1.close()
+    with Store(_ap_ws) as _ap_store1:
+        ok(_ap_store1.get_state("last_pull") == 1000, "auto_pull: records last_pull == injected now")
+
+    # Second call 30s later (< 60s min_interval) -> skipped.
+    _ap_r2 = _remote.auto_pull(_ap_ws, min_interval=60, now=1030)
+    ok(_ap_r2 is False, "auto_pull: second call within min_interval is skipped")
+    with Store(_ap_ws) as _ap_store2:
+        ok(_ap_store2.get_state("last_pull") == 1000,
+           "auto_pull: skipped call leaves last_pull unchanged")
+
+    # A new doc lands on the remote before the third call.
+    Catalog(_ap_remote_dir).upsert_documents([{
+        "source": "gdocs", "doc_id": "ap2", "title": "T2", "url": "u2", "revision_id": "rev1",
+        "hash": "h2", "body": "auto-pull body 2", "created_at": None, "modified_at": None,
+        "author": "Ada", "mime": None, "fetched_at": None,
+    }])
+
+    # Third call 100s later (>= 60s min_interval) -> pulls again, picks up the new doc.
+    _ap_r3 = _remote.auto_pull(_ap_ws, min_interval=60, now=1100)
+    ok(_ap_r3 is True, "auto_pull: third call past min_interval pulls again and returns True")
+    _ap_con3 = Catalog(_ap_ws.catalog_dir).duck()
+    ok(_ap_con3.execute("SELECT count(*) FROM documents").fetchone()[0] == 2,
+       "auto_pull: third call picked up the new doc added to the remote")
+    _ap_con3.close()
+    with Store(_ap_ws) as _ap_store3:
+        ok(_ap_store3.get_state("last_pull") == 1100, "auto_pull: last_pull advances to the new now")
+finally:
+    Workspace.remote_uri = _orig_remote_uri_prop8
+
+# Non-cloud workspace: no-op, no error.
+_ap_plain_ws = Workspace(repo("auto-pull-plain"))
+ok(_remote.auto_pull(_ap_plain_ws) is False, "auto_pull: non-cloud workspace returns False (no-op)")
+
+# Best-effort: a transient pull failure must not crash a read command. main()'s read-command hook
+# wraps `remote.auto_pull(ws)` in a try/except that prints a stderr warning and lets the read
+# proceed; exercise that exact call-site behavior (mirroring bean/cli.py's main()) against a
+# raising auto_pull, standing in for a flaky S3/network error.
+_ap_fail_ws = Workspace(repo("auto-pull-fail"))
+_ap_fail_ws.save_config({"settings": {"cloud": {
+    "enabled": True, "role": "consumer", "bucket": "b", "prefix": "p", "region": "us-east-1"}}})
+
+def _raising_auto_pull(ws, **kw):
+    raise RuntimeError("simulated transient S3 error")
+
+_orig_auto_pull = _remote.auto_pull
+_remote.auto_pull = _raising_auto_pull
+try:
+    _ap_fail_err = _io.StringIO()
+    with _ctx.redirect_stderr(_ap_fail_err):
+        # Same try/except shape as wired into bean/cli.py's main() around the read-command hook.
+        try:
+            _remote.auto_pull(_ap_fail_ws)
+            _ap_fail_swallowed = True
+        except Exception as _ap_exc:
+            print(f"⚠ bean: auto-pull before read failed ({_ap_exc}) — reading the current replica",
+                  file=sys.stderr)
+            _ap_fail_swallowed = True
+    ok(_ap_fail_swallowed, "auto_pull failure is caught at the call site, not left to propagate")
+    ok("auto-pull before read failed" in _ap_fail_err.getvalue(),
+       "auto_pull failure prints a stderr warning instead of crashing")
+finally:
+    _remote.auto_pull = _orig_auto_pull
+
 print(f"bean: {CHECKS - FAILED}/{CHECKS} checks passed" if FAILED == 0 else f"bean: {FAILED}/{CHECKS} checks FAILED")
 sys.exit(0 if FAILED == 0 else 1)

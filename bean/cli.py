@@ -42,6 +42,12 @@ from .workspace import (Workspace, credential_context, credential_path, load_sco
 SOURCE_KEYS = [s.key for s in SOURCES]
 AUTH = {s.auth: s for s in SOURCES if s.auth}
 
+# Subcommands that read the index — these trigger a guarded auto-pull first when cloud-enabled
+# (see `main`). Deliberately excludes non-read commands (init/auth/config/scope/cloud/pull/sync/
+# plugins/status): `sync` already pulls internally, `pull` is explicit, and the rest don't read
+# the catalog.
+_READ_CMDS = {"search", "recent", "doc", "thread", "neighbors", "related", "sql"}
+
 
 def _scope_split():
     """(global_keys, local_keys) over the registered sources, from ~/.bean/scopes.json."""
@@ -695,6 +701,17 @@ def main(argv: list[str] | None = None) -> int:
 
     args = parser.parse_args(argv)
     ws = Workspace()
+    # Guarded auto-pull before cloud reads: a consumer sees fresh data without a manual `bean
+    # pull`, but back-to-back queries don't each re-pull (auto_pull's own min-interval guard).
+    # Best-effort — a transient refresh failure (e.g. flaky S3) must never fail a read; it just
+    # falls back to whatever's already in the local replica.
+    if args.cmd in _READ_CMDS and ws.is_cloud:
+        from . import remote
+        try:
+            remote.auto_pull(ws)
+        except Exception as exc:
+            print(f"⚠ bean: auto-pull before read failed ({exc}) — reading the current replica",
+                  file=sys.stderr)
     # Warn (never auto-sync) when the index is stale, on the commands that read the index.
     if args.cmd in {"search", "recent", "thread", "doc", "related", "status", "init"}:
         note = _staleness_note(ws)

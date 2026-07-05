@@ -24,6 +24,27 @@ def pull(ws) -> None:
     _copy_new(ws.remote_uri, ws.replica_dir)
 
 
+def auto_pull(ws, *, min_interval: int = 60, now: float | None = None) -> bool:
+    """Guarded auto-refresh: pull `ws`'s replica before a cloud read, but skip it if the last pull
+    (manual `bean pull` or a prior `auto_pull`) landed less than `min_interval` seconds ago, so
+    back-to-back reads don't each trigger a fetch. No-op (returns False) in local (non-cloud) mode.
+    `now` is injectable for deterministic tests; defaults to the current epoch seconds. Returns
+    whether a pull actually ran. A `last_pull` left by `bean pull` (an ISO string, not a number) is
+    treated as "no timing info yet" rather than raising — it just means this call pulls again."""
+    if not ws.is_cloud:
+        return False
+    import time
+    from .store import Store
+    now = now if now is not None else time.time()
+    with Store(ws) as store:
+        last_pull = store.get_state("last_pull")
+        if isinstance(last_pull, (int, float)) and now - last_pull < min_interval:
+            return False
+        pull(ws)
+        store.set_state("last_pull", now)
+    return True
+
+
 def push(ws) -> None:
     """Upload `ws`'s local replica up to its remote — the reverse of `pull`, used by `cloud_init`
     to seed a fresh bucket with an already-indexed local catalog. No-op in local (non-cloud) mode,
