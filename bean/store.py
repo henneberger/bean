@@ -119,6 +119,10 @@ class Store:
         correctly return every migrated doc as needing embedding, so the next sync re-embeds them into
         the new chunk dataset — carrying `embedded_hash` over would make `embed_queue` skip those docs
         and searches would return nothing for them."""
+        if self._cloud_writer:
+            # A cloud writer's authoritative store is the remote; migrating legacy rows into the
+            # local (pull-only) replica is never right — skip entirely.
+            return
         if self.get_state("catalog_migrated"):
             return
         has_legacy = self._state.execute(

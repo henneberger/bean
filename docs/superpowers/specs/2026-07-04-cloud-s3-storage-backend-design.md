@@ -243,6 +243,14 @@ Two distinct migrations:
 - **No cross-dataset atomicity** — momentary orphans possible on crash, self-healing (above).
 - **Full replication** — every machine stores the whole index locally (same as today's local mode).
   Appropriate at personal/team scale; not a design for very large corpora that can't fit a laptop.
+- **Cloud consumers are read-only.** `bean sync` is refused on a consumer (`role=consumer`); use
+  `bean pull` to fetch the latest index.
+- **Cloud `--rebuild` is unsupported in v1.** The writer path only embeds each connector's changed
+  set, so it can't re-embed unchanged docs. To change chunking or the embedding model, rebuild
+  locally and re-run `bean cloud init` to re-upload.
+- **No per-doc embed-checkpoint on the cloud writer path.** A hard kill mid-sync (after a connector
+  advances its cursor, before the commit) can leave a doc unfetched until its content next changes —
+  cursor rollback only covers exceptions, not hard kills.
 
 ## Explicitly out of scope (→ subsystem #2)
 

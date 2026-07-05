@@ -335,10 +335,14 @@ def cmd_sync(ws: Workspace, args) -> int:
     from .sync import run_sync
     glob, loc = _scope_split()
     log = lambda m: print(f"  · {m}", file=sys.stderr)  # noqa: E731
-    results = [run_sync(ws, only=args.source, keys=loc, full=args.rebuild, since_days=args.since, log=log)]
-    if glob:  # global sources sync into the shared workspace
-        results.append(run_sync(Workspace.global_(), only=args.source, keys=glob, full=args.rebuild,
-                                since_days=args.since, log=log))
+    try:
+        results = [run_sync(ws, only=args.source, keys=loc, full=args.rebuild, since_days=args.since, log=log)]
+        if glob:  # global sources sync into the shared workspace
+            results.append(run_sync(Workspace.global_(), only=args.source, keys=glob, full=args.rebuild,
+                                    since_days=args.since, log=log))
+    except RuntimeError as err:
+        print(f"✗ {err}", file=sys.stderr)
+        return 1
     errors = [e for r in results for e in r["errors"]]
     changed = sum(len(r["changed"]) for r in results)
     removed = sum(len(r["removed"]) for r in results)

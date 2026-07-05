@@ -1956,5 +1956,94 @@ ok(_mw_con3.execute("SELECT count(*) FROM documents WHERE doc_id='shared'").fetc
    "multi-writer: the shared-key doc (B's version) is untouched by A's unrelated deletion")
 _mw_con3.close()
 
+# -- Final-review fixes: cloud consumer read-only guard, cloud --rebuild fail-fast, migration guard -
+# A cloud CONSUMER must refuse `bean sync` outright — it's a pull-only replica, and routing it
+# through the local sync path would write documents/chunks straight into the replica, corrupting it.
+_cons_ws = Workspace(repo("cloud-consumer-refuse"))
+_cons_ws.save_config({"settings": {"cloud": {
+    "enabled": True, "role": "consumer", "bucket": "b", "prefix": "p", "region": "us-east-1"}}})
+_orig_remote_uri_cons = Workspace.remote_uri
+Workspace.remote_uri = property(lambda self: str(Path(tempfile.mkdtemp(prefix="bean-cons-remote-"))))
+try:
+    try:
+        run_sync(_cons_ws, embed_fn=fake_embed)
+        ok(False, "cloud consumer: run_sync should have raised")
+    except RuntimeError as err:
+        ok("read-only" in str(err) or "consumer" in str(err),
+           f"cloud consumer: run_sync raises a read-only guard error ({err})")
+finally:
+    Workspace.remote_uri = _orig_remote_uri_cons
+
+# cmd_sync surfaces that guard cleanly (non-zero exit, no traceback) rather than propagating it.
+from bean.cli import cmd_sync  # noqa: E402
+import argparse as _argparse  # noqa: E402
+_cons_ws2 = Workspace(repo("cloud-consumer-cmd"))
+_cons_ws2.save_config({"settings": {"cloud": {
+    "enabled": True, "role": "consumer", "bucket": "b", "prefix": "p", "region": "us-east-1"}}})
+Workspace.remote_uri = property(lambda self: str(Path(tempfile.mkdtemp(prefix="bean-cons-remote2-"))))
+try:
+    _cons_args = _argparse.Namespace(source=None, rebuild=False, since=90)
+    _cons_rc = cmd_sync(_cons_ws2, _cons_args)
+    ok(_cons_rc != 0, "cloud consumer: cmd_sync returns non-zero rather than raising a traceback")
+finally:
+    Workspace.remote_uri = _orig_remote_uri_cons
+
+# A cloud WRITER refuses `--rebuild` (full=True): the writer path only embeds each connector's
+# changed set and can't re-embed unchanged docs, so a --rebuild would silently mix the index.
+_cwr_ws = Workspace(repo("cloud-writer-rebuild-refuse"))
+_cwr_remote_dir = Path(tempfile.mkdtemp(prefix="bean-cwr-remote-"))
+_cwr_ws.save_config({"settings": {"cloud": {
+    "enabled": True, "role": "writer", "bucket": "b", "prefix": "p", "region": "us-east-1"}}})
+Workspace.remote_uri = property(lambda self: str(_cwr_remote_dir))
+try:
+    try:
+        run_sync(_cwr_ws, full=True, refetch=False, embed_fn=fake_embed)
+        ok(False, "cloud writer: run_sync(full=True) should have raised")
+    except RuntimeError as err:
+        ok("rebuild" in str(err).lower(), f"cloud writer: --rebuild raises a fail-fast error ({err})")
+finally:
+    Workspace.remote_uri = _orig_remote_uri_cons
+
+# A NON-cloud full=True sync must still succeed -- the local --rebuild/reembed path is unaffected.
+_local_rebuild_ws = Workspace(repo("local-rebuild-still-works"))
+with Store(_local_rebuild_ws) as _lrw_store:
+    _lrw_store.upsert("src", "doc1", title="Doc One", url=None, revision_id="r1",
+                      body="widgets and rollbacks for local rebuild coverage")
+_local_rebuild_result = reembed(_local_rebuild_ws, embed_fn=fake_embed)
+ok(_local_rebuild_result["docs"] == 1,
+   "local full=True (reembed helper) still succeeds on a non-cloud workspace")
+
+# Migration guard: a cloud-writer Store with a legacy DuckDB `documents` table present must NOT
+# copy those rows into the (pull-only) replica -- the migration is skipped entirely in writer mode.
+_mig_ws = Workspace(repo("cloud-writer-migration-guard"))
+_mig_remote_dir = Path(tempfile.mkdtemp(prefix="bean-mig-remote-"))
+_mig_ws.save_config({"settings": {"cloud": {
+    "enabled": True, "role": "writer", "bucket": "b", "prefix": "p", "region": "us-east-1"}}})
+import duckdb as _duckdb  # noqa: E402
+_mig_priv = _duckdb.connect(str(_mig_ws.db_path))
+_mig_priv.execute("CREATE TABLE documents (source TEXT, doc_id TEXT, title TEXT, url TEXT, "
+                  "revision_id TEXT, hash TEXT, body TEXT, created_at TIMESTAMP, "
+                  "modified_at TIMESTAMP, author TEXT, mime TEXT, fetched_at TIMESTAMP)")
+_mig_priv.execute("INSERT INTO documents VALUES ('src','legacy-doc','T',NULL,'r1','h1','body',"
+                  "NULL,NULL,NULL,NULL,NULL)")
+_mig_priv.execute("CREATE TABLE revisions (source TEXT, doc_id TEXT, revision_id TEXT, hash TEXT, "
+                  "fetched_at TIMESTAMP)")
+_mig_priv.execute("CREATE TABLE edges (source TEXT, src_doc TEXT, rel TEXT, dst_kind TEXT, dst TEXT)")
+_mig_priv.close()
+Workspace.remote_uri = property(lambda self: str(_mig_remote_dir))
+try:
+    with Store(_mig_ws) as _mig_store:
+        ok(_mig_store._cloud_writer is True, "migration guard: Store entered cloud-writer mode")
+        ok(_mig_store.get("src", "legacy-doc") is None,
+           "migration guard: the legacy row was NOT copied into the replica in cloud-writer mode")
+finally:
+    Workspace.remote_uri = _orig_remote_uri_cons
+# The legacy DuckDB tables (and the flag) are left untouched, since the migration never ran.
+_mig_check = _duckdb.connect(str(_mig_ws.db_path))
+ok(_mig_check.execute(
+    "SELECT count(*) FROM duckdb_tables() WHERE table_name = 'documents'").fetchone()[0] == 1,
+   "migration guard: the legacy `documents` table is left in place (migration skipped, not run)")
+_mig_check.close()
+
 print(f"bean: {CHECKS - FAILED}/{CHECKS} checks passed" if FAILED == 0 else f"bean: {FAILED}/{CHECKS} checks FAILED")
 sys.exit(0 if FAILED == 0 else 1)

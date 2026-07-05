@@ -74,7 +74,17 @@ def run_sync(ws: Workspace, *, only: str | None = None, keys: set | None = None,
         from .embed import embedder  # lazy: model load only when embedding
         embed_fn = embedder(settings["embedding"])
 
+    if ws.is_cloud and ws.cloud.get("role") != "writer":
+        raise RuntimeError(
+            "this is a read-only cloud consumer — nothing to sync; run `bean pull` to fetch the "
+            "latest index, or `bean cloud init` to become a writer.")
+
     if ws.is_cloud and ws.cloud.get("role") == "writer":
+        if full:
+            raise RuntimeError(
+                "cloud `--rebuild` cannot re-embed unchanged docs in v1. To change chunking or the "
+                "embedding model for a cloud index, rebuild locally and re-run `bean cloud init` to "
+                "re-upload.")
         return _run_sync_cloud(ws, config=config, settings=settings, embed_fn=embed_fn,
                                only=only, keys=keys, full=full, since_days=since_days,
                                fetch=fetch, refetch=refetch, log=log)
